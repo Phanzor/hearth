@@ -30,8 +30,7 @@ Built with [FTXUI](https://github.com/ArthurSonzogni/FTXUI),
 
 ## Roadmap
 
-Where this is headed - bringing the Odysseus ideas into the terminal. Rough
-priority order; subject to change.
+Where this is headed. Rough priority order; subject to change.
 
 **Conversations & memory**
 - [ ] Persist conversations to disk and reopen them

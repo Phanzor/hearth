@@ -51,6 +51,11 @@ Where this is headed. Rough priority order; subject to change.
 - [ ] Tool use / function calling (let the model take actions)
 - [ ] Image input for multimodal models
 
+**Integrations**
+- [ ] Embedded terminal panes - run subscription CLI agents
+      (Claude Code, OpenAI Codex, etc.) inside Hearth via a PTY, so local and
+      subscription assistants live in one app
+
 **Quality of life**
 - [ ] Stop / regenerate / edit messages
 - [ ] More themes + an in-app theme picker

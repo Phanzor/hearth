@@ -1,6 +1,6 @@
 # Hearth (terminal AI chat)
 
-A terminal-native AI chat app in C++ - a private, local AI by your own fire,
+A terminal-native AI chat app in C++ - a private, local AI workspace solution,
 inspired by PewDiePie's "Odysseus" but running entirely as a TUI. Built with [FTXUI](https://github.com/ArthurSonzogni/FTXUI),
 [cpp-httplib](https://github.com/yhirose/cpp-httplib), and
 [nlohmann/json](https://github.com/nlohmann/json). It talks to a local

@@ -6,8 +6,9 @@ local [Ollama](https://ollama.com) server and streams replies token-by-token.
 
 <!-- Drop a screenshot at docs/screenshot.png (or change the path below). -->
 <p align="center">
-  <img src="docs/screenshot.png" alt="Hearth - terminal AI chat" width="820">
+  <img width="1045" height="659" alt="image" src="https://github.com/user-attachments/assets/35a374c2-bc20-4593-b2a1-1c292fb6b412" />
 </p>
+
 
 Built with [FTXUI](https://github.com/ArthurSonzogni/FTXUI),
 [cpp-httplib](https://github.com/yhirose/cpp-httplib), and

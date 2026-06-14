@@ -1,0 +1,15 @@
+# Build output
+/build/
+
+# CMake artifacts (in case of in-source builds)
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store

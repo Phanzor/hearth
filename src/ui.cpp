@@ -5,6 +5,7 @@
 #include <ftxui/component/event.hpp>
 #include <ftxui/component/mouse.hpp>
 #include <ftxui/dom/elements.hpp>
+#include <ftxui/dom/flexbox_config.hpp>
 #include <ftxui/screen/box.hpp>
 
 #include <algorithm>
@@ -52,6 +53,9 @@ static void probe_extended_keys(AppState& state) {
         return;
     }
     state.extended_keys_probed = true;
+    // Bracketed paste is universally safe to ask for: terminals that don't speak
+    // it ignore the request, and it lets us take a multi-line paste verbatim.
+    std::cout << "\x1b[?2004h" << std::flush;
     const char* env = std::getenv("HEARTH_EXTENDED_KEYS");
     if (env && env[0] == '0') {
         return;  // forced off
@@ -70,6 +74,43 @@ static void disable_extended_keys(AppState& state) {
     }
     std::cout << "\x1b[<u" << std::flush;  // pop our pushed flag
     state.extended_keys = false;
+}
+
+// Undo the terminal modes we turned on, on the way out.
+static void restore_terminal(AppState& state) {
+    std::cout << "\x1b[?2004l" << std::flush;  // disable bracketed paste
+    disable_extended_keys(state);
+}
+
+static std::string base64_encode(const std::string& in) {
+    static const char* tbl =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string out;
+    out.reserve(((in.size() + 2) / 3) * 4);
+    int val = 0, bits = -6;
+    for (unsigned char c : in) {
+        val = (val << 8) + c;
+        bits += 8;
+        while (bits >= 0) {
+            out.push_back(tbl[(val >> bits) & 0x3F]);
+            bits -= 6;
+        }
+    }
+    if (bits > -6) {
+        out.push_back(tbl[((val << 8) >> (bits + 8)) & 0x3F]);
+    }
+    while (out.size() % 4) {
+        out.push_back('=');
+    }
+    return out;
+}
+
+// Copy text to the system clipboard via OSC 52. The app grabs the mouse (for
+// wheel scrolling), so a drag never reaches the terminal's own selection; we
+// take FTXUI's selection and put it on the clipboard ourselves instead. Works
+// on kitty, foot, Ghostty, WezTerm, recent iTerm2/xterm.
+static void copy_to_clipboard(const std::string& text) {
+    std::cout << "\x1b]52;c;" << base64_encode(text) << "\x07" << std::flush;
 }
 
 static std::string utf8_encode(int cp) {
@@ -139,7 +180,7 @@ static bool translate_key(const std::string& in, AppState& state, ScreenInteract
 
     if (fin == 'u') {  // a CSI-u key report; always protocol-specific
         if (ctrl && (code == 'c' || code == 'C')) {  // Ctrl+C quits
-            disable_extended_keys(state);
+            restore_terminal(state);
             screen.ExitLoopClosure()();
             return true;
         }
@@ -206,6 +247,27 @@ static std::function<Element(InputState)> plain_input(Color fg) {
     };
 }
 
+// A wrapping line like paragraph(), but each space stays attached to its word
+// instead of being a flexbox gap, so a mouse selection copies the spaces too
+// (FTXUI's selection can't see layout gaps, only characters in text elements).
+static Element selectable_paragraph(const std::string& line) {
+    Elements words;
+    size_t start = 0;
+    while (start < line.size()) {
+        const size_t sp = line.find(' ', start);
+        const size_t len = (sp == std::string::npos) ? std::string::npos : sp - start + 1;
+        words.push_back(text(line.substr(start, len)));
+        if (sp == std::string::npos) {
+            break;
+        }
+        start = sp + 1;
+    }
+    if (words.empty()) {
+        words.push_back(text(""));
+    }
+    return flexbox(std::move(words));
+}
+
 // Claude-Code style: the user's turn is a highlighted block; everything else is
 // the model and renders as Markdown with no "You/Assistant" labels. System
 // notices (slash-command output) render dimmed.
@@ -217,7 +279,7 @@ static Element render_message(const Theme& t, const Message& m) {
         std::stringstream ss(m.content);
         std::string ln;
         while (std::getline(ss, ln)) {
-            lines.push_back(paragraph(ln) | color(t.user_fg) | bold);
+            lines.push_back(selectable_paragraph(ln) | color(t.user_fg) | bold);
         }
         if (lines.empty()) {
             lines.push_back(text(" "));
@@ -336,10 +398,15 @@ struct SlashCmd {
 
 static const std::vector<SlashCmd> kCommands = {
     {"help", "show available commands"},
-    {"clear", "clear the conversation"},
+    {"delete", "delete the current chat"},
+    {"archive", "archive the current chat"},
     {"model", "pick a model (lists installed)"},
     {"quit", "exit Hearth"},
 };
+
+// Defined further down (after the sidebar); used by the slash handler.
+static void delete_conv(AppState& state, int idx);
+static void archive_conv(AppState& state, int idx);
 
 // Case-insensitive subsequence match, so "/he" and "/hlp" both match "help".
 static bool fuzzy_match(const std::string& q, const std::string& name) {
@@ -383,16 +450,20 @@ static void run_slash(AppState& state, ScreenInteractive& screen, const std::str
 
     Conversation& conv = state.active();
     conv.scroll = 1.0f;
-    if (cmd == "clear") {
-        // Clear deletes the current chat and returns to a blank draft.
+    if (cmd == "delete") {
         if (state.active_conv >= 0) {
-            storage::erase(state.conversations[state.active_conv].id);
-            state.conversations.erase(state.conversations.begin() + state.active_conv);
+            delete_conv(state, state.active_conv);  // returns to a blank draft
+            state.status = "chat deleted";
+        } else {
+            state.status = "no active chat to delete";
         }
-        state.active_conv = -1;
-        state.draft = Conversation{};
-        state.sidebar_sel = 0;
-        state.status = "chat cleared";
+    } else if (cmd == "archive") {
+        if (state.active_conv >= 0) {
+            archive_conv(state, state.active_conv);  // moves it to archived, blank draft
+            state.status = "chat archived";
+        } else {
+            state.status = "no active chat to archive";
+        }
     } else if (cmd == "help") {
         std::string txt = "Commands:";
         for (const auto& c : kCommands) {
@@ -417,7 +488,7 @@ static void run_slash(AppState& state, ScreenInteractive& screen, const std::str
             state.status = "model set to " + chosen;
         }
     } else if (cmd == "quit" || cmd == "exit") {
-        disable_extended_keys(state);
+        restore_terminal(state);
         screen.ExitLoopClosure()();
     } else {
         state.status = "error: unknown command /" + cmd;
@@ -1236,6 +1307,32 @@ static void commit_rename(AppState& state) {
     state.popup = 0;
 }
 
+// Drop a finished bracketed paste into whichever text field is active: the
+// rename editor (flattened to a single line) or, otherwise, the chat input.
+static void insert_paste(AppState& state, const std::string& text) {
+    if (text.empty()) {
+        return;
+    }
+    if (state.popup == 3 || state.popup == 4) {
+        std::string flat = text;
+        std::replace(flat.begin(), flat.end(), '\n', ' ');
+        std::replace(flat.begin(), flat.end(), '\t', ' ');
+        int& cur = state.rename_cursor;
+        cur = std::clamp(cur, 0, static_cast<int>(state.rename_buf.size()));
+        state.rename_buf.insert(cur, flat);
+        cur += static_cast<int>(flat.size());
+        return;
+    }
+    if (state.view != 0) {
+        return;  // no text field to paste into outside the chat view
+    }
+    int& cur = state.input_cursor;
+    cur = std::clamp(cur, 0, static_cast<int>(state.input.size()));
+    state.input.insert(cur, text);
+    cur += static_cast<int>(text.size());
+    state.palette_sel = 0;
+}
+
 ftxui::Component build_app(AppState& state, ScreenInteractive& screen) {
     refresh_models(state, screen);  // populate the model list on startup
 
@@ -1334,6 +1431,43 @@ ftxui::Component build_app(AppState& state, ScreenInteractive& screen) {
     // arrows + Tab/Enter for completion; otherwise Tab is swallowed (reserved).
     return CatchEvent(layout, [sidebar, &state, &screen](Event e) {
         probe_extended_keys(state);  // first event: query terminal support (unless forced)
+
+        // Bracketed paste: the terminal frames a paste in ESC[200~ ... ESC[201~.
+        // We gather everything between verbatim so a multi-line paste lands as
+        // text in the input instead of submitting at each embedded newline.
+        if (e.input() == "\x1b[200~") {
+            state.pasting = true;
+            state.paste_buf.clear();
+            return true;
+        }
+        if (state.pasting) {
+            if (e.input() == "\x1b[201~") {
+                state.pasting = false;
+                insert_paste(state, state.paste_buf);
+                return true;
+            }
+            if (e.is_character()) {
+                state.paste_buf += e.character();
+            } else if (e.input() == "\n" || e.input() == "\r") {
+                state.paste_buf += "\n";
+            } else if (e.input() == "\t") {
+                state.paste_buf += "\t";
+            }
+            return true;  // swallow the rest of the paste payload
+        }
+
+        // Finishing a mouse drag copies the selection to the clipboard (OSC 52),
+        // so "select + Ctrl+Shift+V elsewhere" works. Not consumed: FTXUI still
+        // owns the drag for highlighting the selection.
+        if (e.is_mouse() && e.mouse().button == Mouse::Left &&
+            e.mouse().motion == Mouse::Released) {
+            const std::string sel = screen.GetSelection();
+            if (!sel.empty()) {
+                copy_to_clipboard(sel);
+                state.status = "copied selection to clipboard";
+            }
+        }
+
         if (!state.extended_keys && is_extended_keys_reply(e.input())) {
             std::cout << "\x1b[>1u" << std::flush;  // supported: push the flag, turn on
             state.extended_keys = true;
@@ -1344,7 +1478,7 @@ ftxui::Component build_app(AppState& state, ScreenInteractive& screen) {
             return true;  // a CSI-u key report we remapped to a legacy event
         }
         if (e.input() == std::string(1, '\x03')) {
-            disable_extended_keys(state);
+            restore_terminal(state);
             screen.ExitLoopClosure()();
             return true;
         }

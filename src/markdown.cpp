@@ -67,22 +67,27 @@ Element styled_word(const Theme& t, const std::string& w, Span kind) {
     }
 }
 
-// Lay out a line's words in a wrapping flexbox (a styled `paragraph`).
+// Lay out a line's words in a wrapping flexbox (a styled `paragraph`). Each
+// space stays attached to its word rather than being a layout gap, so a mouse
+// selection copies the spaces too (FTXUI's selection can't see flexbox gaps).
 Element inline_flow(const Theme& t, const std::string& s) {
     Elements words;
     for (const auto& [run, kind] : parse_spans(s)) {
-        std::stringstream ss(run);
-        std::string w;
-        while (std::getline(ss, w, ' ')) {
-            if (!w.empty()) {
-                words.push_back(styled_word(t, w, kind));
+        size_t start = 0;
+        while (start < run.size()) {
+            const size_t sp = run.find(' ', start);
+            const size_t len = (sp == std::string::npos) ? std::string::npos : sp - start + 1;
+            words.push_back(styled_word(t, run.substr(start, len), kind));
+            if (sp == std::string::npos) {
+                break;
             }
+            start = sp + 1;
         }
     }
     if (words.empty()) {
         return text("");
     }
-    return flexbox(std::move(words), FlexboxConfig().SetGap(1, 0));
+    return flexbox(std::move(words));
 }
 
 Element render_line(const Theme& t, const std::string& line) {

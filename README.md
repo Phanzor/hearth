@@ -18,23 +18,34 @@ Built with [FTXUI](https://github.com/ArthurSonzogni/FTXUI),
 
 - **Streaming chat** against Ollama's `/api/chat`, rendered Claude-Code style
   (your turn highlighted, the model's reply as plain prose).
+- **Multiple conversations** in a sidebar tree - start new chats, switch between
+  them live, and **archive**, **delete**, or **rename** any of them through a
+  confirming action menu. Every chat is saved to disk and reopens on next launch.
 - **Markdown** in replies: fenced code blocks, inline code, bold, headers, lists.
-- **Slash commands** with a live, fuzzy-searched palette - `/help`, `/clear`,
-  `/model`, `/quit`. Arrow keys to choose, Tab/Enter to autofill.
+- **Multi-line input** with a block cursor and soft-wrapping. `Shift+Enter` (on
+  terminals that speak the extended keyboard protocol) or `Alt+Enter` inserts a
+  newline; plain `Enter` sends.
+- **Slash commands** with a live, fuzzy-searched palette - `/help`, `/delete`,
+  `/archive`, `/model`, `/quit`. Arrow keys to choose, Tab/Enter to autofill.
 - **`/model` auto-populates** the models installed on the server (`/api/tags`),
   so you set the host once and pick a model from the list.
+- **Archive & export** - archived chats move out of the sidebar into Settings,
+  where they can be exported to Markdown (individually or all at once).
 - **Scrollback** with the mouse wheel or PageUp/PageDown.
 - **Token accounting** per session (prompt / reply / total).
-- **Dark theme** backed by a small theme system; settings (host, model, theme)
-  persist under `~/.config/hearth/`.
+- **Context-aware key hints** - the footer always shows the keys relevant to
+  whatever is currently focused.
+- **Dark theme** backed by a small theme system. Settings (host, model, theme)
+  persist under `~/.config/hearth/`; conversations under `~/.local/share/hearth/`
+  (both honor the matching `XDG_*` variables).
 
 ## Roadmap
 
 Where this is headed. Rough priority order; subject to change.
 
 **Conversations & memory**
-- [ ] Persist conversations to disk and reopen them
-- [ ] Multiple chats you can switch between
+- [x] Persist conversations to disk and reopen them
+- [x] Multiple chats you can switch between, plus archive / delete / rename
 - [ ] Long-term memory the model can recall across sessions
 
 **Knowledge (RAG)**
@@ -57,9 +68,10 @@ Where this is headed. Rough priority order; subject to change.
       subscription assistants live in one app
 
 **Quality of life**
+- [x] Multi-line message input (`Shift+Enter` / `Alt+Enter`)
+- [x] Export a conversation to Markdown
 - [ ] Stop / regenerate / edit messages
 - [ ] More themes + an in-app theme picker
-- [ ] Export a conversation to Markdown
 - [ ] Voice in/out (speech-to-text, text-to-speech)
 
 ## Build & run
@@ -85,19 +97,30 @@ ollama pull qwen2.5:7b
 | Key | Action |
 | --- | --- |
 | type + `Enter` | Send a message |
+| `Shift+Enter` / `Alt+Enter` | Insert a newline (multi-line message) |
+| `Ctrl+Shift+V` | Paste (multi-line safe via bracketed paste) |
 | `/` | Open the slash-command palette |
-| `↑` / `↓` | Navigate (sidebar views, settings fields, or the palette) |
+| `↑` / `↓` | Navigate (sidebar rows, settings fields, or the palette) |
 | `←` / `→` | Move between the sidebar and the active view |
+| `Enter` (on a sidebar chat) | Open its action menu (delete / archive / rename) |
 | `Tab` | Autofill the highlighted palette item |
+| drag-select with the mouse | Copy the selection to the clipboard (OSC 52) |
 | mouse wheel / `PgUp` `PgDn` | Scroll the history |
 | `Ctrl+C` | Quit |
+
+To **copy** text out, just select it with the mouse: on release the selection
+is copied to your system clipboard (via OSC 52), ready to paste with
+`Ctrl+Shift+V`. No `Ctrl+Shift+C` needed - Hearth captures the mouse for
+scrolling, so it copies the selection itself rather than leaving it to the
+terminal. (Your terminal must allow OSC 52 clipboard writes, which most do.)
 
 ### Slash commands
 
 | Command | Action |
 | --- | --- |
 | `/help` | List available commands |
-| `/clear` | Clear the conversation and reset the session token counts |
+| `/delete` | Delete the current chat and return to a blank draft |
+| `/archive` | Archive the current chat (manage it later from Settings) |
 | `/model [name]` | Pick a model - lists what's installed; fuzzy-matches a name |
 | `/quit` | Exit |
 
@@ -108,15 +131,19 @@ with `/model` instead - it lists what the server has installed. Saving writes to
 `~/.config/hearth/config.json` (honoring `XDG_CONFIG_HOME`) and is loaded on
 startup.
 
+Settings also lists your **archived chats**: select one to export, delete, or
+rename it, or export them all to Markdown at once.
+
 ## Architecture
 
 Deliberately modular so features can be added without entangling concerns:
 
 | File | Responsibility |
 | --- | --- |
-| `src/main.cpp` | Entry point: load config, create the screen, run the loop. |
-| `src/app_state.h` | `AppState` - the single source of truth (messages, input, settings, flags). |
+| `src/main.cpp` | Entry point: load config, load saved chats, create the screen, run the loop. |
+| `src/app_state.h` | `AppState` - the single source of truth (conversations, input, settings, popups, flags). |
 | `src/config.{h,cpp}` | Load/save settings as JSON under the XDG config dir. |
+| `src/storage.{h,cpp}` | Persist chats as JSON under the XDG data dir (active + archived) and export to Markdown. |
 | `src/ollama.{h,cpp}` | Ollama client: streaming `/api/chat` and model listing via `/api/tags`. |
 | `src/markdown.{h,cpp}` | Renders a Markdown subset into FTXUI elements. |
 | `src/theme.{h,cpp}` | The `Theme` palette and the theme registry. |
@@ -127,7 +154,9 @@ Deliberately modular so features can be added without entangling concerns:
 `ollama::chat_stream` blocks (it reads the HTTP response as it arrives), so the
 chat view launches it on a worker thread. The worker never touches UI state
 directly - each token is marshalled back onto the UI thread via
-`ScreenInteractive::Post`, so there are no locks and no data races.
+`ScreenInteractive::Post`, so there are no locks and no data races. Workers
+target the chat by its stable id, so you can switch, archive, or delete
+conversations while a reply is still streaming.
 
 ### Notes / current limitations
 

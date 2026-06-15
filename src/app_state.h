@@ -58,6 +58,8 @@ struct AppState {
     bool streaming = false;
     bool extended_keys = false;        // extended keyboard protocol active (detected/forced on)
     bool extended_keys_probed = false; // startup capability probe already done
+    bool pasting = false;              // currently inside a bracketed-paste sequence
+    std::string paste_buf;             // accumulates pasted text until the end marker
     std::string status;
 
     Conversation& active() { return active_conv < 0 ? draft : conversations[active_conv]; }

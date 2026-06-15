@@ -42,7 +42,8 @@ struct AppState {
 
     int view = 0;             // content shown: 0 = chat, 1 = settings
     int sidebar_sel = 0;      // highlighted sidebar row (0 = New Chat)
-    int settings_sel = 0;     // highlighted settings row (3+ = archived chats)
+    int settings_view = 0;    // settings subview: 0 = General, 1 = Connections, 2 = Themes, 3 = Archive
+    int settings_sel = 0;     // highlighted row within the current settings subview
 
     // Action popup. 0 = none, 1 = active-chat menu, 2 = archived-chat menu,
     // 3 = rename active chat, 4 = rename archived chat.

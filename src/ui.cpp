@@ -987,8 +987,8 @@ static Component build_settings_view(AppState& state, ScreenInteractive& screen)
     line.transform = plain_input(state.theme.text);
     auto host_input = Input(&state.config.host, "http://localhost:11434", line);
 
-    // Save highlights from our focus index (not its own focus), since it doubles
-    // as the active child for the virtual archived rows.
+    // Save highlights from our focus index (not its own focus): it also parks the
+    // container's focus for the subviews whose rows are drawn virtually.
     ButtonOption bopt;
     bopt.transform = [&state](const EntryState&) {
         const Theme& t = state.theme;
@@ -1006,91 +1006,154 @@ static Component build_settings_view(AppState& state, ScreenInteractive& screen)
 
     auto container = Container::Vertical({host_input, save});
 
-    // Focus rows: 0 host, 1 Save, then (if any) 2 = Export all, 3+i = archived[i].
-    auto nfoc = [&state] {
-        return state.archived.empty() ? 2 : 3 + static_cast<int>(state.archived.size());
-    };
-
-    auto view = Renderer(container, [host_input, save, &state, nfoc] {
+    // The content shown depends on which subview the sidebar tree has hovered
+    // (state.settings_view). General is a read-only overview; Connections owns
+    // the host field + Save; Themes is a picker; Archive manages archived chats.
+    auto view = Renderer(container, [host_input, save, &state] {
         const Theme& t = state.theme;
-        if (state.settings_sel >= nfoc()) {
-            state.settings_sel = 0;
-        }
         auto mark = [&](int i) { return (state.settings_sel == i) ? std::string(" ▶ ") : std::string("   "); };
 
         Elements rows;
         rows.push_back(text(""));
-        rows.push_back(text("  Settings") | color(t.accent) | bold);
-        rows.push_back(text(""));
-        rows.push_back(hbox({
-            text(mark(0) + "Ollama host  ") | (state.settings_sel == 0 ? (color(t.accent) | bold) : color(t.text_dim)),
-            hbox({text(" "), host_input->Render() | flex}) | bgcolor(t.panel_alt),
-        }));
-        rows.push_back(text(""));
-        rows.push_back(hbox({text(mark(1)), save->Render()}));
-        rows.push_back(text(""));
-        rows.push_back(hbox({
-            text("   model in use  ") | color(t.text_dim),
-            text(state.config.model) | color(t.model) | bold,
-        }));
-        rows.push_back(text(""));
-        rows.push_back(text("  Archived chats") | color(t.accent) | bold);
-        rows.push_back(text(""));
-        if (state.archived.empty()) {
-            rows.push_back(text("   (none)") | color(t.text_dim));
-        } else {
+        if (state.settings_view == 1) {  // Connections
+            rows.push_back(text("  Connections") | color(t.accent) | bold);
+            rows.push_back(text(""));
             rows.push_back(hbox({
-                text(mark(2) + "Export all") | (state.settings_sel == 2 ? (color(t.accent) | bold) : color(t.text)),
-                text("  (" + std::to_string(state.archived.size()) + ")") | color(t.text_dim),
+                text(mark(0) + "Ollama host  ") | (state.settings_sel == 0 ? (color(t.accent) | bold) : color(t.text_dim)),
+                hbox({text(" "), host_input->Render() | flex}) | bgcolor(t.panel_alt),
             }));
-            for (int i = 0; i < static_cast<int>(state.archived.size()); ++i) {
-                std::string title = state.archived[i].title.empty() ? "Untitled" : state.archived[i].title;
-                if (title.size() > 30) {
-                    title = title.substr(0, 29) + "…";
-                }
-                rows.push_back(text(mark(3 + i) + "├ " + title)
-                               | (state.settings_sel == 3 + i ? (color(t.select) | bold) : color(t.text)));
+            rows.push_back(text(""));
+            rows.push_back(hbox({text(mark(1)), save->Render()}));
+            rows.push_back(text(""));
+            rows.push_back(hbox({
+                text("   model in use  ") | color(t.text_dim),
+                text(state.config.model) | color(t.model) | bold,
+            }));
+            rows.push_back(text(""));
+            rows.push_back(text("   Pick a model with /model in chat.") | color(t.text_dim));
+        } else if (state.settings_view == 2) {  // Themes
+            rows.push_back(text("  Themes") | color(t.accent) | bold);
+            rows.push_back(text(""));
+            const auto& all = themes();
+            for (int i = 0; i < static_cast<int>(all.size()); ++i) {
+                const bool cur = (all[i].name == state.config.theme);
+                rows.push_back(hbox({
+                    text(mark(i) + all[i].name)
+                        | (state.settings_sel == i ? (color(t.select) | bold) : color(t.text)),
+                    text("   "),
+                    text("  ") | bgcolor(all[i].accent),
+                    text("  ") | bgcolor(all[i].select),
+                    text("  ") | bgcolor(all[i].ok),
+                    text("  ") | bgcolor(all[i].err),
+                    text(cur ? "  (current)" : "") | color(t.text_dim),
+                }));
             }
+            rows.push_back(text(""));
+            rows.push_back(text("   Enter to apply a theme.") | color(t.text_dim));
+        } else if (state.settings_view == 3) {  // Archive
+            rows.push_back(text("  Archived chats") | color(t.accent) | bold);
+            rows.push_back(text(""));
+            if (state.archived.empty()) {
+                rows.push_back(text("   (none yet - archive a chat from the sidebar)") | color(t.text_dim));
+            } else {
+                rows.push_back(hbox({
+                    text(mark(0) + "Export all") | (state.settings_sel == 0 ? (color(t.accent) | bold) : color(t.text)),
+                    text("  (" + std::to_string(state.archived.size()) + ")") | color(t.text_dim),
+                }));
+                for (int i = 0; i < static_cast<int>(state.archived.size()); ++i) {
+                    std::string title = state.archived[i].title.empty() ? "Untitled" : state.archived[i].title;
+                    if (title.size() > 30) {
+                        title = title.substr(0, 29) + "…";
+                    }
+                    const std::string branch = (i + 1 == static_cast<int>(state.archived.size())) ? "└ " : "├ ";
+                    rows.push_back(text(mark(1 + i) + branch + title)
+                                   | (state.settings_sel == 1 + i ? (color(t.select) | bold) : color(t.text)));
+                }
+            }
+        } else {  // General overview
+            rows.push_back(text("  Settings") | color(t.accent) | bold);
+            rows.push_back(text(""));
+            rows.push_back(text("   A private, local AI workspace. Choose a section on the left.") | color(t.text_dim));
+            rows.push_back(text(""));
+            auto kv = [&](const std::string& k, Element v) {
+                return hbox({text("   " + k) | color(t.text_dim) | size(WIDTH, EQUAL, 18), v});
+            };
+            rows.push_back(kv("Model", text(state.config.model) | color(t.model) | bold));
+            rows.push_back(kv("Host", text(state.config.host) | color(t.text)));
+            rows.push_back(kv("Theme", text(state.config.theme) | color(t.text)));
+            rows.push_back(kv("Active chats", text(std::to_string(state.conversations.size())) | color(t.text)));
+            rows.push_back(kv("Archived chats", text(std::to_string(state.archived.size())) | color(t.text)));
         }
+
         Element doc = vbox(std::move(rows)) | flex;
         // Hide the terminal cursor unless the host field is being edited, so it
-        // doesn't park in the corner on the Save / archived rows.
+        // doesn't park in the corner on the other rows.
         return host_input->Focused() ? doc : (doc | focus);
     });
 
-    return CatchEvent(view, [host_input, save, container, nfoc, &state](Event e) {
-        if (e == Event::ArrowDown) {
-            state.settings_sel = (state.settings_sel + 1) % nfoc();
-            container->SetActiveChild(state.settings_sel == 0 ? host_input : save);
-            return true;
+    return CatchEvent(view, [host_input, save, container, &state](Event e) {
+        // The host field is the only real text input; keep it focused only on the
+        // Connections host row, so other subviews never capture typing or a cursor.
+        container->SetActiveChild((state.settings_view == 1 && state.settings_sel == 0) ? host_input : save);
+
+        if (state.settings_view == 1) {  // Connections: host (0), Save (1)
+            if (e == Event::ArrowDown || e == Event::ArrowUp) {
+                state.settings_sel ^= 1;
+                container->SetActiveChild(state.settings_sel == 0 ? host_input : save);
+                return true;
+            }
+            return false;  // host edits itself; Save's Enter runs the save
         }
-        if (e == Event::ArrowUp) {
-            state.settings_sel = (state.settings_sel + nfoc() - 1) % nfoc();
-            container->SetActiveChild(state.settings_sel == 0 ? host_input : save);
-            return true;
+        if (state.settings_view == 2) {  // Themes
+            const int n = std::max(1, static_cast<int>(themes().size()));
+            if (e == Event::ArrowDown) { state.settings_sel = (state.settings_sel + 1) % n; return true; }
+            if (e == Event::ArrowUp)   { state.settings_sel = (state.settings_sel + n - 1) % n; return true; }
+            if (e == Event::Return) {
+                const auto& all = themes();
+                const Theme& th = all[std::clamp(state.settings_sel, 0, static_cast<int>(all.size()) - 1)];
+                state.config.theme = th.name;
+                state.theme = th;  // apply live everywhere that reads state.theme
+                save_config(state.config);
+                state.status = "theme set to " + th.name;
+                return true;
+            }
+            return false;
         }
-        if (e == Event::Return) {
-            if (state.settings_sel == 2 && !state.archived.empty()) {
-                int count = 0;
-                for (const auto& c : state.archived) {
-                    if (!storage::export_markdown(c).empty()) {
-                        count++;
+        if (state.settings_view == 3) {  // Archive: Export all (0), archived[i] (1+i)
+            const int n = state.archived.empty() ? 0 : 1 + static_cast<int>(state.archived.size());
+            if (n == 0) {  // nothing to navigate; don't leak keys into the hidden Save button
+                return e == Event::ArrowUp || e == Event::ArrowDown || e == Event::Return;
+            }
+            if (state.settings_sel >= n) {
+                state.settings_sel = 0;
+            }
+            if (e == Event::ArrowDown) { state.settings_sel = (state.settings_sel + 1) % n; return true; }
+            if (e == Event::ArrowUp)   { state.settings_sel = (state.settings_sel + n - 1) % n; return true; }
+            if (e == Event::Return) {
+                if (state.settings_sel == 0) {
+                    int count = 0;
+                    for (const auto& c : state.archived) {
+                        if (!storage::export_markdown(c).empty()) {
+                            count++;
+                        }
+                    }
+                    state.status = "exported " + std::to_string(count) + " chats to " + storage::export_dir();
+                } else {
+                    const int i = state.settings_sel - 1;
+                    if (i < static_cast<int>(state.archived.size())) {
+                        state.popup = 2;
+                        state.popup_conv = i;
+                        state.popup_sel = 0;  // default to Export (non-destructive)
                     }
                 }
-                state.status = "exported " + std::to_string(count) + " chats to " + storage::export_dir();
                 return true;
             }
-            if (state.settings_sel >= 3) {  // an archived chat -> manage popup
-                const int i = state.settings_sel - 3;
-                if (i < static_cast<int>(state.archived.size())) {
-                    state.popup = 2;
-                    state.popup_conv = i;
-                    state.popup_sel = 0;  // default to Export (non-destructive)
-                }
-                return true;
-            }
+            return false;
         }
-        return false;  // host / Save handle their own keys
+        // General: read-only. Swallow vertical nav / Enter so they don't move
+        // focus onto the host field or trip the hidden Save button; Left still
+        // bubbles to the parent and returns to the sidebar tree.
+        return e == Event::ArrowUp || e == Event::ArrowDown || e == Event::Return;
     });
 }
 
@@ -1147,17 +1210,28 @@ class SidebarBase : public ComponentBase {
             const std::string branch = (i == n - 1) ? "└ " : "├ ";
             rows.push_back(make_row(i + 1, branch, label, t.text, foc));
         }
-        rows.push_back(make_row(n + 1, "", "Settings", t.text_dim, foc));
+        const int srow = settings_row();
+        rows.push_back(make_row(srow, "", "Settings", t.text_dim, foc));
+        // The settings subviews unfold as a tree only while the section is the
+        // hovered one, so the sidebar stays compact the rest of the time.
+        if (settings_open()) {
+            rows.push_back(make_row(srow + 1, "├ ", "Connections", t.text_dim, foc));
+            rows.push_back(make_row(srow + 2, "├ ", "Themes", t.text_dim, foc));
+            rows.push_back(make_row(srow + 3, "└ ", "Archive", t.text_dim, foc));
+        }
         return vbox(std::move(rows));
     }
 
  private:
-    int last_row() const { return static_cast<int>(state_.conversations.size()) + 1; }
+    int settings_row() const { return static_cast<int>(state_.conversations.size()) + 1; }
+    bool settings_open() const { return state_.sidebar_sel >= settings_row(); }
+    int last_row() const { return settings_open() ? settings_row() + 3 : settings_row(); }
 
     // Move the highlight and live-display the newly hovered row.
     void move(int delta) {
         state_.sidebar_sel = std::clamp(state_.sidebar_sel + delta, 0, last_row());
         const int n = static_cast<int>(state_.conversations.size());
+        const int srow = settings_row();
         const int s = state_.sidebar_sel;
         if (s == 0) {
             state_.active_conv = -1;  // blank draft
@@ -1166,7 +1240,9 @@ class SidebarBase : public ComponentBase {
             state_.active_conv = s - 1;
             state_.view = 0;
         } else {
-            state_.view = 1;  // Settings
+            state_.view = 1;                    // Settings (+ which subview)
+            state_.settings_view = s - srow;    // 0 General, 1 Connections, 2 Themes, 3 Archive
+            state_.settings_sel = 0;            // start at the top of the new subview
         }
     }
 
@@ -1374,12 +1450,16 @@ ftxui::Component build_app(AppState& state, ScreenInteractive& screen) {
                        ? "↑/↓: navigate   →: enter view   Enter: delete / archive   Ctrl+C: quit"
                        : "↑/↓: navigate   →: enter view   Ctrl+C: quit";
         } else if (state.view == 1) {
-            if (state.settings_sel >= 3) {
-                hint = "←: views   ↑/↓: move   Enter: manage chat   Ctrl+C: quit";
-            } else if (state.settings_sel == 2) {
-                hint = "←: views   ↑/↓: move   Enter: export all   Ctrl+C: quit";
-            } else {
+            if (state.settings_view == 1) {
                 hint = "←: views   ↑/↓: move   Enter: save   Ctrl+C: quit";
+            } else if (state.settings_view == 2) {
+                hint = "←: views   ↑/↓: choose   Enter: apply theme   Ctrl+C: quit";
+            } else if (state.settings_view == 3) {
+                hint = (state.settings_sel >= 1)
+                           ? "←: views   ↑/↓: move   Enter: manage chat   Ctrl+C: quit"
+                           : "←: views   ↑/↓: move   Enter: export all   Ctrl+C: quit";
+            } else {
+                hint = "←: views   ↑/↓: sections   Ctrl+C: quit";
             }
         } else {
             hint = "←: views   / commands   Ctrl+C: quit";

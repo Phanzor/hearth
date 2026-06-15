@@ -12,9 +12,11 @@ struct Theme {
     std::string name;
 
     // Surfaces.
-    ftxui::Color bg;         // app background (darkest)
-    ftxui::Color panel;      // header / sidebar / status bar
-    ftxui::Color panel_alt;  // input box, selected sidebar item
+    ftxui::Color bg;          // app background (darkest)
+    ftxui::Color bg_focus;    // chat area when the view is focused
+    ftxui::Color panel;       // header / sidebar / status bar
+    ftxui::Color panel_focus; // sidebar when it is focused
+    ftxui::Color panel_alt;   // input box, selected sidebar item
 
     // Text.
     ftxui::Color text;       // primary text

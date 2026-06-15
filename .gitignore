@@ -13,3 +13,6 @@ compile_commands.json
 *.swp
 *~
 .DS_Store
+
+# Local-only Claude working notes
+CLAUDE.md

@@ -8,7 +8,7 @@ include(FetchContent)
 
 FetchContent_Declare(ftxui
   GIT_REPOSITORY https://github.com/ArthurSonzogni/FTXUI.git
-  GIT_TAG v5.0.0)
+  GIT_TAG v7.0.0)
 FetchContent_Declare(json
   URL https://github.com/nlohmann/json/releases/download/v3.11.3/json.tar.xz)
 FetchContent_Declare(httplib
@@ -29,7 +29,8 @@ add_executable(hearth
   src/ollama.cpp
   src/config.cpp
   src/theme.cpp
-  src/markdown.cpp)
+  src/markdown.cpp
+  src/storage.cpp)
 
 target_include_directories(hearth PRIVATE src)
 target_link_libraries(hearth PRIVATE

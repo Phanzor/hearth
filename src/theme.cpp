@@ -8,7 +8,9 @@ static Theme dark() {
     Theme t;
     t.name = "dark";
     t.bg = Color::RGB(22, 22, 24);
+    t.bg_focus = Color::RGB(28, 28, 32);
     t.panel = Color::RGB(34, 34, 38);
+    t.panel_focus = Color::RGB(46, 46, 52);
     t.panel_alt = Color::RGB(50, 50, 56);
     t.text = Color::RGB(216, 216, 220);
     t.text_dim = Color::RGB(120, 120, 128);

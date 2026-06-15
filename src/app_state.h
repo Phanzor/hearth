@@ -44,10 +44,13 @@ struct AppState {
     int sidebar_sel = 0;      // highlighted sidebar row (0 = New Chat)
     int settings_sel = 0;     // highlighted settings row (3+ = archived chats)
 
-    // Delete/archive confirmation popup.
-    int popup = 0;            // 0 = none, 1 = confirm delete/archive
+    // Action popup. 0 = none, 1 = active-chat menu, 2 = archived-chat menu,
+    // 3 = rename active chat, 4 = rename archived chat.
+    int popup = 0;
     int popup_sel = 0;        // selected popup button
     int popup_conv = -1;      // conversation index the popup targets
+    std::string rename_buf;   // editable title while a rename popup is open
+    int rename_cursor = 0;    // cursor (byte index) within rename_buf
 
     std::string input;
     int input_cursor = 0;     // chat input cursor position (for autofill)

@@ -1050,7 +1050,7 @@ class SidebarBase : public ComponentBase {
             if (state_.sidebar_sel >= 1 && state_.sidebar_sel <= n) {
                 state_.popup = 1;
                 state_.popup_conv = state_.sidebar_sel - 1;
-                state_.popup_sel = 2;  // default to the safe option (Cancel)
+                state_.popup_sel = 3;  // default to the safe option (Cancel)
                 return true;
             }
             return false;
@@ -1155,8 +1155,8 @@ static void archive_conv(AppState& state, int idx) {
     state.draft = Conversation{};
 }
 
-// The centered confirmation modal. type 1 = active chat (Delete/Archive/Cancel),
-// type 2 = archived chat (Export/Delete/Cancel).
+// The centered action modal. type 1 = active chat (Delete/Archive/Rename/Cancel),
+// type 2 = archived chat (Export/Delete/Rename/Cancel).
 static Element confirm_popup(const Theme& t, int type, const std::string& title, int sel) {
     auto btn = [&](const std::string& label, int idx, Color c) {
         Element e = text(" " + label + " ");
@@ -1175,16 +1175,65 @@ static Element confirm_popup(const Theme& t, int type, const std::string& title,
         buttons.push_back(btn("Delete", 1, t.err));
     }
     buttons.push_back(text("  "));
-    buttons.push_back(btn("Cancel", 2, t.text_dim));
+    buttons.push_back(btn("Rename", 2, t.accent));
+    buttons.push_back(text("  "));
+    buttons.push_back(btn("Cancel", 3, t.text_dim));
     buttons.push_back(filler());
     return vbox({
-               text(type == 1 ? "Delete this chat?" : "Archived chat") | bold | color(t.accent) | hcenter,
+               text(type == 1 ? "Manage chat" : "Archived chat") | bold | color(t.accent) | hcenter,
                text(""),
                paragraph(disp) | color(t.text) | hcenter,
                text(""),
                hbox(std::move(buttons)),
            }) |
            border | bgcolor(t.panel) | size(WIDTH, GREATER_THAN, 42);
+}
+
+// The rename modal: a single-line field with a block cursor over the title.
+static Element rename_popup(const Theme& t, const std::string& buf, int cursor) {
+    const int cur = std::clamp(cursor, 0, static_cast<int>(buf.size()));
+    const bool at_end = cur >= static_cast<int>(buf.size());
+    const std::string cg = at_end ? " " : buf.substr(cur, glyph_next(buf, cur) - cur);
+    auto field = hbox({
+                     text(buf.substr(0, cur)) | color(t.text),
+                     text(cg) | color(t.text) | focusCursorBlockBlinking,
+                     text(at_end ? "" : buf.substr(glyph_next(buf, cur))) | color(t.text),
+                     filler(),
+                 }) | bgcolor(t.panel_alt);
+    return vbox({
+               text("Rename chat") | bold | color(t.accent) | hcenter,
+               text(""),
+               hbox({text(" "), field, text(" ")}),
+               text(""),
+               text("Enter: save    Esc: cancel") | color(t.text_dim) | hcenter,
+           }) |
+           border | bgcolor(t.panel) | size(WIDTH, GREATER_THAN, 42);
+}
+
+// Open the rename popup (type 3 = active chat, 4 = archived) seeded with the
+// current title, with the cursor at the end.
+static void begin_rename(AppState& state, int type, int idx) {
+    const auto& list = (type == 4) ? state.archived : state.conversations;
+    if (idx < 0 || idx >= static_cast<int>(list.size())) {
+        return;
+    }
+    state.rename_buf = list[idx].title;
+    state.rename_cursor = static_cast<int>(state.rename_buf.size());
+    state.popup = type;
+    state.popup_conv = idx;
+}
+
+// Commit the rename popup: write the edited title back and persist.
+static void commit_rename(AppState& state) {
+    const bool archived = (state.popup == 4);
+    auto& list = archived ? state.archived : state.conversations;
+    const int idx = state.popup_conv;
+    if (idx >= 0 && idx < static_cast<int>(list.size())) {
+        list[idx].title = state.rename_buf;
+        storage::save(list[idx], archived);
+        state.status = "chat renamed";
+    }
+    state.popup = 0;
 }
 
 ftxui::Component build_app(AppState& state, ScreenInteractive& screen) {
@@ -1218,7 +1267,9 @@ ftxui::Component build_app(AppState& state, ScreenInteractive& screen) {
 
         // Context-aware key hints: surface the keys relevant to what's focused.
         std::string hint;
-        if (state.popup) {
+        if (state.popup == 3 || state.popup == 4) {
+            hint = "Type to rename   Enter: save   Esc: cancel";
+        } else if (state.popup) {
             hint = "←/→: choose   Enter: confirm   Esc: cancel";
         } else if (side_foc) {
             const int nconv = static_cast<int>(state.conversations.size());
@@ -1237,14 +1288,20 @@ ftxui::Component build_app(AppState& state, ScreenInteractive& screen) {
             hint = "←: views   / commands   Ctrl+C: quit";
         }
 
-        auto statusbar = hbox({
+        // Two-line footer: key hints on top; the status indicator (with any
+        // notification pushed to the right) on the bottom.
+        auto hint_line = hbox({
+            text("  " + hint + " ") | color(th.text_dim),
+            filler(),
+        }) | bgcolor(th.panel);
+        auto status_line = hbox({
             text(state.streaming ? " ◐ streaming " : " ● ready ")
                 | color(state.streaming ? th.warn : th.ok),
-            text("  " + hint + " ") | color(th.text_dim),
             filler(),
             text(state.status.empty() ? "" : (state.status + " "))
                 | color(state.status.rfind("error", 0) == 0 ? th.err : th.ok) | bold,
         }) | bgcolor(th.panel);
+        auto statusbar = vbox({hint_line, status_line});
 
         Element doc = vbox({
             header,
@@ -1255,7 +1312,9 @@ ftxui::Component build_app(AppState& state, ScreenInteractive& screen) {
             statusbar,
         }) | bgcolor(th.bg);
 
-        if (state.popup) {
+        if (state.popup == 3 || state.popup == 4) {
+            doc = dbox({doc, rename_popup(th, state.rename_buf, state.rename_cursor) | center});
+        } else if (state.popup) {
             std::string title;
             if (state.popup == 1 && state.popup_conv >= 0 &&
                 state.popup_conv < static_cast<int>(state.conversations.size())) {
@@ -1289,18 +1348,55 @@ ftxui::Component build_app(AppState& state, ScreenInteractive& screen) {
             screen.ExitLoopClosure()();
             return true;
         }
-        // The delete/archive popup is modal: it captures all input while open.
+        // The rename popup is a modal single-line editor over the title.
+        if (state.popup == 3 || state.popup == 4) {
+            std::string& s = state.rename_buf;
+            int& cur = state.rename_cursor;
+            cur = std::clamp(cur, 0, static_cast<int>(s.size()));
+            if (e == Event::Return) {
+                commit_rename(state);
+            } else if (e == Event::Escape) {
+                state.popup = 0;
+            } else if (e == Event::Backspace) {
+                if (cur > 0) {
+                    const int prev = glyph_prev(s, cur);
+                    s.erase(prev, cur - prev);
+                    cur = prev;
+                }
+            } else if (e == Event::Delete) {
+                if (cur < static_cast<int>(s.size())) {
+                    s.erase(cur, glyph_next(s, cur) - cur);
+                }
+            } else if (e == Event::ArrowLeft) {
+                cur = glyph_prev(s, cur);
+            } else if (e == Event::ArrowRight) {
+                cur = glyph_next(s, cur);
+            } else if (e == Event::Home) {
+                cur = 0;
+            } else if (e == Event::End) {
+                cur = static_cast<int>(s.size());
+            } else if (e.is_character()) {
+                s.insert(cur, e.character());
+                cur += static_cast<int>(e.character().size());
+            }
+            return true;  // modal: swallow everything else
+        }
+        // The action menu is modal: it captures all input while open.
         if (state.popup) {
             if (e == Event::ArrowLeft) {
                 state.popup_sel = std::max(0, state.popup_sel - 1);
             } else if (e == Event::ArrowRight) {
-                state.popup_sel = std::min(2, state.popup_sel + 1);
+                state.popup_sel = std::min(3, state.popup_sel + 1);
             } else if (e == Event::Escape) {
                 state.popup = 0;
             } else if (e == Event::Return) {
                 const int act = state.popup_sel;
                 const int idx = state.popup_conv;
                 const int type = state.popup;
+                if (act == 2) {  // Rename: open the editor (type 1->3, 2->4)
+                    begin_rename(state, type + 2, idx);
+                    return true;
+                }
                 state.popup = 0;
                 if (type == 1) {
                     if (act == 0) {

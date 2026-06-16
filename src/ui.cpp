@@ -1320,7 +1320,6 @@ static Element theme_editor_view(AppState& state) {
 static bool handle_theme_editor(AppState& state, Event e) {
     const auto& pal = theme_palette();
     const int nslot = static_cast<int>(pal.size());
-    const int nrows = 1 + nslot + 2;  // name + slots + Save + Cancel
     const int save_row = 1 + nslot;
     const int cancel_row = save_row + 1;
 
@@ -1359,15 +1358,21 @@ static bool handle_theme_editor(AppState& state, Event e) {
         cancel_theme_edit(state);
         return true;
     }
-    if (e == Event::ArrowUp) {
-        state.theme_edit_sel = (state.theme_edit_sel + nrows - 1) % nrows;
-        sync_hsv_from_slot(state);
-        return true;
-    }
-    if (e == Event::ArrowDown) {
-        state.theme_edit_sel = (state.theme_edit_sel + 1) % nrows;
-        sync_hsv_from_slot(state);
-        return true;
+    // Up/Down walk name -> slots -> the Save/Cancel row (treated as one row);
+    // Left/Right then pick between Save and Cancel.
+    {
+        const int s = state.theme_edit_sel;
+        const bool on_buttons = (s == save_row || s == cancel_row);
+        if (e == Event::ArrowUp) {
+            state.theme_edit_sel = on_buttons ? nslot : (s == 0 ? save_row : s - 1);
+            sync_hsv_from_slot(state);
+            return true;
+        }
+        if (e == Event::ArrowDown) {
+            state.theme_edit_sel = on_buttons ? 0 : (s == nslot ? save_row : s + 1);
+            sync_hsv_from_slot(state);
+            return true;
+        }
     }
 
     const int sel = state.theme_edit_sel;
@@ -1395,13 +1400,17 @@ static bool handle_theme_editor(AppState& state, Event e) {
         return true;
     }
     if (sel == save_row) {
-        if (e == Event::Return) {
+        if (e == Event::ArrowRight) {
+            state.theme_edit_sel = cancel_row;
+        } else if (e == Event::Return) {
             commit_theme(state);
         }
         return true;
     }
     if (sel == cancel_row) {
-        if (e == Event::Return) {
+        if (e == Event::ArrowLeft) {
+            state.theme_edit_sel = save_row;
+        } else if (e == Event::Return) {
             cancel_theme_edit(state);
         }
         return true;
@@ -1973,7 +1982,7 @@ ftxui::Component build_app(AppState& state, ScreenInteractive& screen) {
             } else if (state.theme_edit_sel >= 1 && state.theme_edit_sel <= nslot) {
                 hint = "←/→ hue   [ / ] sat   - / = light   Enter: type hex   ↑/↓: fields   Esc: cancel";
             } else {
-                hint = "Enter: confirm   ↑/↓: fields   Esc: cancel";
+                hint = "←/→: Save / Cancel   Enter: confirm   ↑/↓: fields   Esc: cancel";
             }
         } else if (state.popup == 3 || state.popup == 4) {
             hint = "Type to rename   Enter: save   Esc: cancel";

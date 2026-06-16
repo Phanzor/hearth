@@ -30,7 +30,7 @@ struct Conversation {
 // UI thread, via ScreenInteractive::Post).
 struct AppState {
     Config config;
-    Theme theme = theme_by_name("dark");
+    Theme theme = theme_by_name("midnight");
     std::vector<std::string> models;  // installed models, fetched from the server
 
     // Active chats shown in the tree. active_conv == -1 means the "New Chat"

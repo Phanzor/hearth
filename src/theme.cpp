@@ -543,7 +543,7 @@ static Theme kanagawa() {
 
 static std::vector<Theme> builtin_themes() {
     return {
-        dark(), midnight(), light(), solarized_dark(), solarized_light(),
+        midnight(), dark(), light(), solarized_dark(), solarized_light(),
         nord(), gruvbox(), dracula(), monokai(), one_dark(),
         tokyo_night(), catppuccin(), rose_pine(), everforest(), palenight(),
         ayu_mirage(), night_owl(), cobalt(), zenburn(), kanagawa(),

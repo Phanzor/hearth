@@ -6,7 +6,7 @@
 struct Config {
     std::string host = "http://localhost:11434";
     std::string model = "qwen2.5:7b";
-    std::string theme = "dark";
+    std::string theme = "midnight";
 };
 
 std::string config_path();

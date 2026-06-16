@@ -19,6 +19,10 @@ FetchContent_Declare(httplib
 set(FTXUI_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(FTXUI_BUILD_DOCS OFF CACHE BOOL "" FORCE)
 
+# The cloud provider APIs are HTTPS, so cpp-httplib must link OpenSSL (this also
+# defines CPPHTTPLIB_OPENSSL_SUPPORT on the httplib::httplib interface target).
+set(HTTPLIB_REQUIRE_OPENSSL ON CACHE BOOL "" FORCE)
+
 FetchContent_MakeAvailable(ftxui json httplib)
 
 find_package(Threads REQUIRED)
@@ -27,6 +31,8 @@ add_executable(hearth
   src/main.cpp
   src/ui.cpp
   src/ollama.cpp
+  src/providers.cpp
+  src/grok_oauth.cpp
   src/config.cpp
   src/theme.cpp
   src/markdown.cpp

@@ -30,6 +30,8 @@ nlohmann::json to_json(const Conversation& c) {
     nlohmann::json j;
     j["id"] = c.id;
     j["title"] = c.title;
+    j["provider"] = c.provider;
+    j["model"] = c.model;
     j["last_in"] = c.last_in;
     j["last_out"] = c.last_out;
     j["total_in"] = c.total_in;
@@ -45,6 +47,8 @@ Conversation from_json(const nlohmann::json& j) {
     Conversation c;
     c.id = j.value("id", "");
     c.title = j.value("title", "");
+    c.provider = j.value("provider", "");
+    c.model = j.value("model", "");
     c.last_in = j.value("last_in", 0);
     c.last_out = j.value("last_out", 0);
     c.total_in = j.value("total_in", 0L);

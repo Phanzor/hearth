@@ -1,8 +1,9 @@
 # Hearth
 
-A terminal-native AI chat app in C++ - a private, local AI workspace solution,
+A terminal-native AI chat app in C++ - a private, local-first AI workspace,
 inspired by PewDiePie's "Odysseus" but running entirely as a TUI. It talks to a
-local [Ollama](https://ollama.com) server and streams replies token-by-token.
+local [Ollama](https://ollama.com) server or the major cloud APIs (OpenAI,
+Anthropic, Gemini, Grok) and streams replies token-by-token.
 
 <!-- Drop a screenshot at docs/screenshot.png (or change the path below). -->
 <p align="center">
@@ -16,8 +17,17 @@ Built with [FTXUI](https://github.com/ArthurSonzogni/FTXUI),
 
 ## Features
 
-- **Streaming chat** against Ollama's `/api/chat`, rendered Claude-Code style
-  (your turn highlighted, the model's reply as plain prose).
+- **Streaming chat** against a local Ollama server or the cloud APIs, rendered
+  Claude-Code style (your turn highlighted, the model's reply as plain prose).
+- **Multiple providers** - Ollama (local), OpenAI, Anthropic, Gemini, Grok (xAI),
+  and any OpenAI-compatible endpoint (OpenRouter, Groq, Mistral, ...). Fill in the
+  connections you use in Settings; keys are stored locally.
+- **Per-chat models** - every conversation remembers its own provider and model,
+  so one chat can run on local Llama while another runs on Claude or Grok. Switch
+  with `/model <type> <model>`; the palette lists every model across all your
+  configured connections.
+- **Grok subscriptions** - sign in to a SuperGrok / X Premium+ subscription with
+  native browser OAuth (no API key); the token is cached and refreshed for you.
 - **Multiple conversations** in a sidebar tree - start new chats, switch between
   them live, and **archive**, **delete**, or **rename** any of them through a
   confirming action menu. Every chat is saved to disk and reopens on next launch.
@@ -27,21 +37,29 @@ Built with [FTXUI](https://github.com/ArthurSonzogni/FTXUI),
   newline; plain `Enter` sends.
 - **Slash commands** with a live, fuzzy-searched palette - `/help`, `/delete`,
   `/archive`, `/model`, `/quit`. Arrow keys to choose, Tab/Enter to autofill.
-- **`/model` auto-populates** the models installed on the server (`/api/tags`),
-  so you set the host once and pick a model from the list.
+- **Global system prompt** - an optional instruction prepended to every chat,
+  with an on/off toggle (Settings -> General).
 - **Archive & export** - archived chats move out of the sidebar into Settings,
   where they can be exported to Markdown (individually or all at once).
 - **Scrollback** with the mouse wheel or PageUp/PageDown.
 - **Token accounting** per session (prompt / reply / total).
 - **Context-aware key hints** - the footer always shows the keys relevant to
   whatever is currently focused.
-- **Dark theme** backed by a small theme system. Settings (host, model, theme)
-  persist under `~/.config/hearth/`; conversations under `~/.local/share/hearth/`
-  (both honor the matching `XDG_*` variables).
+- **Themes** - 20 built-in palettes plus an in-app editor for your own, previewed
+  live across the whole UI. Settings (connections, default model, theme) persist
+  under `~/.config/hearth/`; conversations under `~/.local/share/hearth/` (both
+  honor the matching `XDG_*` variables).
 
 ## Roadmap
 
 Where this is headed. Rough priority order; subject to change.
+
+**Providers & models**
+- [x] Local Ollama plus cloud APIs: OpenAI, Anthropic, Gemini, Grok (xAI), and
+      any OpenAI-compatible endpoint
+- [x] Per-chat model selection (`/model <type> <model>`) - each chat remembers
+      its own provider and model
+- [x] Grok subscriptions via native OAuth (no API key)
 
 **Conversations & memory**
 - [x] Persist conversations to disk and reopen them
@@ -70,14 +88,14 @@ Where this is headed. Rough priority order; subject to change.
 **Quality of life**
 - [x] Multi-line message input (`Shift+Enter` / `Alt+Enter`)
 - [x] Export a conversation to Markdown
+- [x] More themes + an in-app theme picker (20 built-ins + a custom editor)
 - [ ] Stop / regenerate / edit messages
-- [ ] More themes + an in-app theme picker
 - [ ] Voice in/out (speech-to-text, text-to-speech)
 
 ## Build & run
 
-Dependencies are fetched automatically by CMake; you only need a C++20 compiler
-and CMake ≥ 3.20.
+Dependencies are fetched automatically by CMake; you need a C++20 compiler,
+CMake ≥ 3.20, and OpenSSL (used by cpp-httplib for HTTPS to the cloud providers).
 
 ```bash
 cmake -S . -B build
@@ -121,18 +139,26 @@ terminal. (Your terminal must allow OSC 52 clipboard writes, which most do.)
 | `/help` | List available commands |
 | `/delete` | Delete the current chat and return to a blank draft |
 | `/archive` | Archive the current chat (manage it later from Settings) |
-| `/model [name]` | Pick a model - lists what's installed; fuzzy-matches a name |
+| `/model [type] [model]` | Set this chat's model. `/model` lists everything; `/model <type>` narrows to a provider; `/model <type> <model>` switches |
 | `/quit` | Exit |
 
 ### Settings
 
-The Settings view holds the Ollama **host** (base URL). Pick the model in chat
-with `/model` instead - it lists what the server has installed. Saving writes to
-`~/.config/hearth/config.json` (honoring `XDG_CONFIG_HOME`) and is loaded on
-startup.
+Settings is split into four sections in the sidebar:
 
-Settings also lists your **archived chats**: select one to export, delete, or
-rename it, or export them all to Markdown at once.
+- **General** - a quick overview plus the global system prompt (with an on/off
+  toggle).
+- **Connections** - every provider in one place: the Ollama host, API keys for
+  OpenAI, Anthropic, Gemini, Grok, and a custom OpenAI-compatible endpoint. The
+  **Grok (subscription)** row signs in via OAuth (no key needed). Fill in whatever
+  you use, then pick a per-chat model in chat with `/model <type> <model>`.
+- **Themes** - an in-app picker over 20 built-ins, plus an editor to create your
+  own (applied live as you tweak it).
+- **Archive** - your archived chats: export, delete, or rename one, or export
+  them all to Markdown at once.
+
+Settings are saved to `~/.config/hearth/config.json` (honoring `XDG_CONFIG_HOME`)
+and loaded on startup; Grok OAuth tokens live alongside it in `grok_oauth.json`.
 
 ## Architecture
 
@@ -144,24 +170,31 @@ Deliberately modular so features can be added without entangling concerns:
 | `src/app_state.h` | `AppState` - the single source of truth (conversations, input, settings, popups, flags). |
 | `src/config.{h,cpp}` | Load/save settings as JSON under the XDG config dir. |
 | `src/storage.{h,cpp}` | Persist chats as JSON under the XDG data dir (active + archived) and export to Markdown. |
-| `src/ollama.{h,cpp}` | Ollama client: streaming `/api/chat` and model listing via `/api/tags`. |
+| `src/ollama.{h,cpp}` | Native Ollama transport: streaming `/api/chat` and model listing via `/api/tags`. |
+| `src/providers.{h,cpp}` | Provider abstraction: dispatches chat + model listing across Ollama, OpenAI, Anthropic, Gemini, Grok, and OpenAI-compatible endpoints. |
+| `src/grok_oauth.{h,cpp}` | Native xAI OAuth (PKCE + loopback callback) for Grok subscriptions; token storage and refresh. |
 | `src/markdown.{h,cpp}` | Renders a Markdown subset into FTXUI elements. |
 | `src/theme.{h,cpp}` | The `Theme` palette and the theme registry. |
 | `src/ui.{h,cpp}` | All FTXUI components: chat, settings, sidebar, slash palette, key handling. |
 
 ### How streaming stays responsive
 
-`ollama::chat_stream` blocks (it reads the HTTP response as it arrives), so the
+`provider::chat_stream` blocks (it reads the HTTP response as it arrives), so the
 chat view launches it on a worker thread. The worker never touches UI state
 directly - each token is marshalled back onto the UI thread via
 `ScreenInteractive::Post`, so there are no locks and no data races. Workers
 target the chat by its stable id, so you can switch, archive, or delete
-conversations while a reply is still streaming.
+conversations while a reply is still streaming. (Cloud providers each have their
+own request/SSE shape behind `provider::chat_stream`; Anthropic and Gemini place
+the system prompt and roles where their APIs expect them.)
 
 ### Notes / current limitations
 
-- HTTP only (no TLS). Fine for a local Ollama; a remote HTTPS host would need
-  OpenSSL wired into cpp-httplib.
+- The cloud providers use HTTPS (cpp-httplib + OpenSSL); the local Ollama host
+  can stay plain HTTP.
+- Grok subscription chat currently goes to xAI's `/v1/chat/completions` with the
+  OAuth token. If xAI only honors a subscription token on its Responses API, that
+  path would need a dedicated `/v1/responses` transport.
 - The streaming worker is detached. Quitting mid-stream is fine in practice (the
   process exits), but a future version should track and cancel it for a clean
   shutdown.

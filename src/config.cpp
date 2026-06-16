@@ -45,6 +45,18 @@ Config load_config() {
         if (j.contains("system_prompt_enabled")) {
             c.system_prompt_enabled = j["system_prompt_enabled"].get<bool>();
         }
+        auto str = [&](const char* k, std::string& dst) {
+            if (j.contains(k) && j[k].is_string()) {
+                dst = j[k].get<std::string>();
+            }
+        };
+        str("provider", c.provider);
+        str("openai_key", c.openai_key);
+        str("anthropic_key", c.anthropic_key);
+        str("gemini_key", c.gemini_key);
+        str("grok_key", c.grok_key);
+        str("custom_base", c.custom_base);
+        str("custom_key", c.custom_key);
     } catch (const std::exception&) {
         // Corrupt config: fall back to defaults rather than crashing.
     }
@@ -58,7 +70,14 @@ bool save_config(const Config& c) {
                          {"model", c.model},
                          {"theme", c.theme},
                          {"system_prompt", c.system_prompt},
-                         {"system_prompt_enabled", c.system_prompt_enabled}};
+                         {"system_prompt_enabled", c.system_prompt_enabled},
+                         {"provider", c.provider},
+                         {"openai_key", c.openai_key},
+                         {"anthropic_key", c.anthropic_key},
+                         {"gemini_key", c.gemini_key},
+                         {"grok_key", c.grok_key},
+                         {"custom_base", c.custom_base},
+                         {"custom_key", c.custom_key}};
         std::ofstream out(config_path());
         if (!out) {
             return false;

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "config.h"
@@ -17,6 +18,8 @@ struct Message {
 struct Conversation {
     std::string id;
     std::string title;
+    std::string provider;  // backend this chat uses ("" = the config default)
+    std::string model;     // model this chat uses ("" = the config default)
     std::vector<Message> messages;
     int last_in = 0;
     int last_out = 0;
@@ -31,7 +34,9 @@ struct Conversation {
 struct AppState {
     Config config;
     Theme theme = theme_by_name("midnight");
-    std::vector<std::string> models;  // installed models, fetched from the server
+    // Available models across all configured providers, as (type, model) pairs
+    // fetched in the background and used by the /model palette.
+    std::vector<std::pair<std::string, std::string>> models;
 
     // Active chats shown in the tree. active_conv == -1 means the "New Chat"
     // draft. Streaming workers target a chat by id, so list mutations are safe.
@@ -71,6 +76,7 @@ struct AppState {
     int input_cursor = 0;     // chat input cursor position (for autofill)
     int palette_sel = 0;      // highlighted item in the slash palette
     bool streaming = false;
+    bool grok_login_busy = false;      // a Grok subscription OAuth login is in flight
     bool extended_keys = false;        // extended keyboard protocol active (detected/forced on)
     bool extended_keys_probed = false; // startup capability probe already done
     bool pasting = false;              // currently inside a bracketed-paste sequence

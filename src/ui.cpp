@@ -21,8 +21,10 @@
 #include <vector>
 
 #include "config.h"
+#include "grok_oauth.h"
 #include "markdown.h"
 #include "ollama.h"
+#include "providers.h"
 #include "storage.h"
 #include "theme.h"
 
@@ -310,6 +312,15 @@ static bool blank(const std::string& s) {
     return s.find_first_not_of(" \t\r\n") == std::string::npos;
 }
 
+// The backend/model a chat talks to: its own saved choice, or the config default
+// for a chat that hasn't picked one yet.
+static std::string conv_provider(const AppState& s, const Conversation& c) {
+    return c.provider.empty() ? s.config.provider : c.provider;
+}
+static std::string conv_model(const AppState& s, const Conversation& c) {
+    return c.model.empty() ? s.config.model : c.model;
+}
+
 // Kicks off a streaming request on a worker thread. All state mutation happens
 // back on the UI thread via screen.Post, so no locking is needed.
 static void send_message(AppState& state, ScreenInteractive& screen) {
@@ -317,10 +328,13 @@ static void send_message(AppState& state, ScreenInteractive& screen) {
         return;
     }
 
-    // Sending from the blank "New Chat" promotes the draft into a saved chat.
+    // Sending from the blank "New Chat" promotes the draft into a saved chat,
+    // carrying over any model the user chose with /model while it was a draft.
     if (state.active_conv < 0) {
         Conversation nc;
         nc.id = storage::new_id();
+        nc.provider = state.draft.provider;
+        nc.model = state.draft.model;
         state.conversations.push_back(std::move(nc));
         state.active_conv = static_cast<int>(state.conversations.size()) - 1;
         state.sidebar_sel = 1 + state.active_conv;
@@ -331,6 +345,14 @@ static void send_message(AppState& state, ScreenInteractive& screen) {
     if (c.title.empty()) {
         c.title = state.input.substr(0, 40);  // name the chat after its first line
     }
+    // Stamp the chat with its backend/model so it keeps using the same one even
+    // if the default later changes.
+    if (c.provider.empty()) {
+        c.provider = state.config.provider;
+    }
+    if (c.model.empty()) {
+        c.model = state.config.model;
+    }
     c.messages.push_back({"user", state.input});
     c.messages.push_back({"assistant", ""}); // placeholder we stream into
     state.input.clear();
@@ -340,20 +362,37 @@ static void send_message(AppState& state, ScreenInteractive& screen) {
     state.status.clear(); // the streaming indicator conveys progress
     storage::save(c, false);  // persist the user turn before the reply arrives
 
-    std::vector<ollama::ChatMessage> request;
-    if (state.config.system_prompt_enabled && !state.config.system_prompt.empty()) {
-        request.push_back({"system", state.config.system_prompt});
-    }
+    std::vector<provider::ChatMessage> request;
     for (size_t i = 0; i + 1 < c.messages.size(); ++i) {
         request.push_back({c.messages[i].role, c.messages[i].content});
     }
-    const std::string host = state.config.host;
-    const std::string model = state.config.model;
+    const std::string system =
+        (state.config.system_prompt_enabled && !state.config.system_prompt.empty())
+            ? state.config.system_prompt
+            : std::string();
+    provider::Provider prov = provider::make(state.config, c.provider, c.model);
+    const bool grok_sub = (c.provider == "grok-sub");
     const std::string cid = c.id;  // target this chat by id, even if the user switches
 
-    std::thread([&state, &screen, request, host, model, cid] {
-        ollama::chat_stream(
-            host, model, request,
+    std::thread([&state, &screen, request, system, prov, grok_sub, cid]() mutable {
+        if (grok_sub) {  // resolve a fresh OAuth access token (may refresh)
+            prov.api_key = grok_oauth::access_token();
+            if (prov.api_key.empty()) {
+                screen.Post([&state, cid] {
+                    state.streaming = false;
+                    state.status = "error: not signed in to Grok - log in via Settings";
+                    if (Conversation* conv = find_conv(state, cid)) {
+                        if (!conv->messages.empty() && conv->messages.back().content.empty()) {
+                            conv->messages.back().content = "(not signed in to Grok)";
+                        }
+                    }
+                });
+                screen.PostEvent(Event::Custom);
+                return;
+            }
+        }
+        provider::chat_stream(
+            prov, system, request,
             [&state, &screen, cid](const std::string& tok) {
                 screen.Post([&state, cid, tok] {
                     if (Conversation* conv = find_conv(state, cid)) {
@@ -386,12 +425,44 @@ static void send_message(AppState& state, ScreenInteractive& screen) {
     }).detach();
 }
 
-// Fetches the installed model list in the background and stores it in state.
+// Fetches the model list from every configured provider in the background and
+// stores them as (type, model) pairs (used by the /model palette).
 static void refresh_models(AppState& state, ScreenInteractive& screen) {
-    const std::string host = state.config.host;
-    std::thread([&state, &screen, host] {
-        auto models = ollama::list_models(host);
-        screen.Post([&state, models] { state.models = models; });
+    const Config cfg = state.config;  // snapshot for the worker
+    std::thread([&state, &screen, cfg] {
+        std::vector<std::pair<std::string, std::string>> all;
+        for (const auto& [id, label] : provider::configured_types(cfg)) {
+            provider::Provider p = provider::make(cfg, id, "");
+            if (id == "grok-sub") {
+                p.api_key = grok_oauth::access_token();
+            }
+            for (const auto& m : provider::list_models(p)) {
+                all.push_back({id, m});
+            }
+        }
+        screen.Post([&state, all] { state.models = all; });
+        screen.PostEvent(Event::Custom);
+    }).detach();
+}
+
+// Runs the Grok subscription OAuth login on a worker thread (it opens a browser
+// and waits for the loopback callback), reporting progress to the status bar.
+static void start_grok_login(AppState& state, ScreenInteractive& screen) {
+    state.grok_login_busy = true;
+    state.status = "starting Grok sign-in...";
+    std::thread([&state, &screen] {
+        auto progress = [&state, &screen](const std::string& msg) {
+            screen.Post([&state, msg] { state.status = msg; });
+            screen.PostEvent(Event::Custom);
+        };
+        const std::string err = grok_oauth::login(progress);
+        screen.Post([&state, &screen, err] {
+            state.grok_login_busy = false;
+            state.status = err.empty() ? "signed in to Grok" : ("Grok sign-in failed: " + err);
+            if (err.empty()) {
+                refresh_models(state, screen);  // grok-sub models are now reachable
+            }
+        });
         screen.PostEvent(Event::Custom);
     }).detach();
 }
@@ -405,7 +476,7 @@ static const std::vector<SlashCmd> kCommands = {
     {"help", "show available commands"},
     {"delete", "delete the current chat"},
     {"archive", "archive the current chat"},
-    {"model", "pick a model (lists installed)"},
+    {"model", "switch model: /model <type> <model>"},
     {"quit", "exit Hearth"},
 };
 
@@ -425,20 +496,27 @@ static bool fuzzy_match(const std::string& q, const std::string& name) {
     return qi == q.size();
 }
 
-// Resolve a typed model query to a full installed model name (exact match, else
-// the first fuzzy match, else the literal text as a fallback).
-static std::string resolve_model(const AppState& state, const std::string& q) {
-    for (const auto& m : state.models) {
-        if (m == q) {
+// Resolve a typed model query within one provider `type` to a known model name
+// (exact match, else first fuzzy match, else the literal text - so models that
+// were never listed can still be selected).
+static std::string resolve_model(const AppState& state, const std::string& type,
+                                 const std::string& q) {
+    for (const auto& [t, m] : state.models) {
+        if (t == type && m == q) {
             return m;
         }
     }
-    for (const auto& m : state.models) {
-        if (fuzzy_match(q, m)) {
+    for (const auto& [t, m] : state.models) {
+        if (t == type && fuzzy_match(q, m)) {
             return m;
         }
     }
     return q;
+}
+
+static bool known_provider(const std::string& t) {
+    return t == "ollama" || t == "openai" || t == "anthropic" || t == "gemini" ||
+           t == "grok" || t == "grok-sub" || t == "custom";
 }
 
 // Handles a line beginning with '/'. Unknown commands report an error.
@@ -476,21 +554,45 @@ static void run_slash(AppState& state, ScreenInteractive& screen, const std::str
         }
         conv.messages.push_back({"system", txt});
     } else if (cmd == "model") {
-        if (args.empty()) {
+        // /model            -> list every available model, grouped by provider
+        // /model <type>     -> list that provider's models
+        // /model <type> <m> -> use that model for this chat
+        std::istringstream ss(args);
+        std::string type, model;
+        ss >> type >> model;
+        const std::string cur_t = conv_provider(state, conv);
+        const std::string cur_m = conv_model(state, conv);
+        if (type.empty()) {
             if (state.models.empty()) {
-                state.status = "no models found - check the host in Settings";
+                state.status = "no models found - add a connection in Settings";
             } else {
-                std::string txt = "Installed models:";
-                for (const auto& m : state.models) {
-                    txt += "\n  " + m + (m == state.config.model ? "  (current)" : "");
+                std::string txt = "Available models (use /model <type> <model>):";
+                std::string last;
+                for (const auto& [t, m] : state.models) {
+                    if (t != last) { txt += "\n " + t + ":"; last = t; }
+                    txt += "\n   " + m + (t == cur_t && m == cur_m ? "  (current)" : "");
                 }
                 conv.messages.push_back({"system", txt});
             }
+        } else if (!known_provider(type)) {
+            state.status = "unknown provider '" + type +
+                           "' (ollama/openai/anthropic/gemini/grok/grok-sub/custom)";
+        } else if (model.empty()) {
+            std::string txt = "Models for " + type + ":";
+            int n = 0;
+            for (const auto& [t, m] : state.models) {
+                if (t == type) { txt += "\n   " + m; n++; }
+            }
+            if (n == 0) {
+                txt += "\n   (none listed - set one anyway with /model " + type + " <model>)";
+            }
+            conv.messages.push_back({"system", txt});
         } else {
-            const std::string chosen = resolve_model(state, args);
-            state.config.model = chosen;
-            save_config(state.config);  // remember the choice across restarts
-            state.status = "model set to " + chosen;
+            const std::string chosen = resolve_model(state, type, model);
+            conv.provider = type;
+            conv.model = chosen;
+            storage::save(conv, false);   // only THIS chat changes; never the shared default
+            state.status = "model set to " + type + " / " + chosen;
         }
     } else if (cmd == "quit" || cmd == "exit") {
         restore_terminal(state);
@@ -511,7 +613,7 @@ struct PaletteItem {
 };
 
 // The palette shown for the current input: matching commands, or - once the
-// command is "/model" - the installed models filtered by what's typed.
+// command is "/model" - first the provider types, then that provider's models.
 static std::vector<PaletteItem> compute_palette(const AppState& state) {
     std::vector<PaletteItem> out;
     const std::string& in = state.input;
@@ -524,10 +626,20 @@ static std::vector<PaletteItem> compute_palette(const AppState& state) {
     const std::string args = (sp == std::string::npos) ? "" : rest.substr(sp + 1);
 
     if (cmd == "model") {
-        for (const auto& m : state.models) {
-            if (fuzzy_match(args, m)) {
-                out.push_back({m, m == state.config.model ? "(current)" : "",
-                               "/model " + m, true, true});
+        const size_t sp2 = args.find(' ');
+        if (sp2 == std::string::npos) {  // still choosing the provider type
+            for (const auto& [id, label] : provider::configured_types(state.config)) {
+                if (fuzzy_match(args, id)) {
+                    out.push_back({id, "provider", "/model " + id + " ", false, false});
+                }
+            }
+        } else {  // type chosen; suggest its models
+            const std::string type = args.substr(0, sp2);
+            const std::string mq = args.substr(sp2 + 1);
+            for (const auto& [t, m] : state.models) {
+                if (t == type && fuzzy_match(mq, m)) {
+                    out.push_back({m, type, "/model " + type + " " + m, true, true});
+                }
             }
         }
     } else {
@@ -912,7 +1024,8 @@ static Component build_chat_view(AppState& state, ScreenInteractive& screen) {
         const Theme& t = state.theme;
         const Conversation& conv = state.active();
         auto info = hbox({
-            text("   " + state.config.model) | color(t.model) | bold,
+            text("   " + conv_provider(state, conv) + " ") | color(t.text_dim),
+            text(conv_model(state, conv)) | color(t.model) | bold,
             text("   session ") | color(t.text_dim),
             text(std::to_string(conv.total_in)) | color(t.token_in),
             text(" / ") | color(t.text_dim),
@@ -943,7 +1056,7 @@ static Component build_chat_view(AppState& state, ScreenInteractive& screen) {
                 palette.push_back(hbox(std::move(row)) | bgcolor(on ? t.panel_alt : t.panel));
             }
         } else if (state.input.rfind("/model", 0) == 0 && state.models.empty()) {
-            palette.push_back(text("  (no models found - set the host in Settings)")
+            palette.push_back(text("  (no models found - add a connection in Settings)")
                               | color(t.text_dim) | bgcolor(t.panel));
         }
 
@@ -1449,11 +1562,26 @@ static bool handle_theme_editor(AppState& state, Event e) {
     return true;
 }
 
+// Row indices in the Connections subview. Row 5 (Grok subscription) is an action
+// row, not a text field; Save sits last.
+static constexpr int kConnGrokSubRow = 5;
+static constexpr int kConnSaveRow = 8;  // ollama base, 4 cloud keys, grok-sub action, custom base+key
+
 static Component build_settings_view(AppState& state, ScreenInteractive& screen) {
     InputOption line;
     line.multiline = false;
     line.transform = plain_input(state.theme.text);
+
+    InputOption secret = line;
+    secret.password = true;  // mask API keys on screen
+
     auto host_input = Input(&state.config.host, "http://localhost:11434", line);
+    auto openai_key_input = Input(&state.config.openai_key, "sk-...", secret);
+    auto anthropic_key_input = Input(&state.config.anthropic_key, "sk-ant-...", secret);
+    auto gemini_key_input = Input(&state.config.gemini_key, "AIza...", secret);
+    auto grok_key_input = Input(&state.config.grok_key, "xai-...", secret);
+    auto custom_base_input = Input(&state.config.custom_base, "https://openrouter.ai/api", line);
+    auto custom_key_input = Input(&state.config.custom_key, "key", secret);
 
     InputOption area;
     area.multiline = true;
@@ -1461,14 +1589,30 @@ static Component build_settings_view(AppState& state, ScreenInteractive& screen)
     auto prompt_input = Input(&state.config.system_prompt,
                               "Describe how the assistant should behave...", area);
 
+    // The text-field input that a given Connections row owns, or null for the
+    // rows that are not text fields (Grok subscription action, Save). Used by the
+    // key handler to route focus.
+    auto conn_input_for = [=](int sel) -> Component {
+        switch (sel) {
+            case 0: return host_input;
+            case 1: return openai_key_input;
+            case 2: return anthropic_key_input;
+            case 3: return gemini_key_input;
+            case 4: return grok_key_input;
+            case 6: return custom_base_input;
+            case 7: return custom_key_input;
+            default: return nullptr;  // 5 = Grok subscription action, 8 = Save
+        }
+    };
+
     // Save highlights from our focus index (not its own focus): it also parks the
-    // container's focus for the subviews whose rows are drawn virtually. It sits at
-    // row 1 in Connections and row 2 in General, so both spellings highlight it.
+    // container's focus for the subviews whose rows are drawn virtually. Its row
+    // is last in both Connections (after the connection fields) and General.
     ButtonOption bopt;
     bopt.transform = [&state](const EntryState&) {
         const Theme& t = state.theme;
         Element e = text(" Save ");
-        const bool on = (state.settings_view == 1 && state.settings_sel == 1) ||
+        const bool on = (state.settings_view == 1 && state.settings_sel == kConnSaveRow) ||
                         (state.settings_view == 0 && state.settings_sel == 2);
         return on ? (e | color(t.bg) | bgcolor(t.accent) | bold)
                   : (e | color(t.accent) | bgcolor(t.panel_alt));
@@ -1477,16 +1621,21 @@ static Component build_settings_view(AppState& state, ScreenInteractive& screen)
         "Save",
         [&state, &screen] {
             state.status = save_config(state.config) ? "settings saved" : "could not save settings";
-            refresh_models(state, screen);  // the host may have changed
+            refresh_models(state, screen);  // a connection may have changed
         },
         bopt);
 
-    auto container = Container::Vertical({host_input, prompt_input, save});
+    auto container = Container::Vertical({
+        host_input, prompt_input,
+        openai_key_input, anthropic_key_input, gemini_key_input, grok_key_input,
+        custom_base_input, custom_key_input,
+        save});
 
     // The content shown depends on which subview the sidebar tree has hovered
     // (state.settings_view). General is a read-only overview; Connections owns
-    // the host field + Save; Themes is a picker; Archive manages archived chats.
-    auto view = Renderer(container, [host_input, prompt_input, save, &state] {
+    // the provider picker + fields + Save; Themes is a picker; Archive manages
+    // archived chats.
+    auto view = Renderer(container, [=, &state] {
         const Theme& t = state.theme;
         auto mark = [&](int i) { return (state.settings_sel == i) ? std::string(" ▶ ") : std::string("   "); };
 
@@ -1495,19 +1644,73 @@ static Component build_settings_view(AppState& state, ScreenInteractive& screen)
         if (state.settings_view == 1) {  // Connections
             rows.push_back(text("  Connections") | color(t.accent) | bold);
             rows.push_back(text(""));
-            rows.push_back(hbox({
-                text(mark(0) + "Ollama host  ") | (state.settings_sel == 0 ? (color(t.accent) | bold) : color(t.text_dim)),
-                hbox({text(" "), host_input->Render() | flex}) | bgcolor(t.panel_alt),
-            }));
+            rows.push_back(text("   Fill in the connections you use, then switch a chat's")
+                           | color(t.text_dim));
+            rows.push_back(text("   model with /model <type> <model>.") | color(t.text_dim));
             rows.push_back(text(""));
-            rows.push_back(hbox({text(mark(1)), save->Render()}));
+
+            auto section = [&](const std::string& title) {
+                rows.push_back(text("  " + title) | color(t.accent));
+            };
+            auto field_row = [&](int idx, const std::string& label, const Component& input) {
+                rows.push_back(hbox({
+                    text(mark(idx) + label) | size(WIDTH, EQUAL, 13)
+                        | (state.settings_sel == idx ? (color(t.accent) | bold) : color(t.text_dim)),
+                    hbox({text(" "), input->Render() | flex}) | bgcolor(t.panel_alt),
+                }));
+            };
+            section("Ollama (local)");
+            field_row(0, "Base URL", host_input);
             rows.push_back(text(""));
-            rows.push_back(hbox({
-                text("   model in use  ") | color(t.text_dim),
-                text(state.config.model) | color(t.model) | bold,
-            }));
+            section("OpenAI");
+            field_row(1, "API key", openai_key_input);
             rows.push_back(text(""));
-            rows.push_back(text("   Pick a model with /model in chat.") | color(t.text_dim));
+            section("Anthropic");
+            field_row(2, "API key", anthropic_key_input);
+            rows.push_back(text(""));
+            section("Gemini");
+            field_row(3, "API key", gemini_key_input);
+            rows.push_back(text(""));
+            section("Grok (xAI API)");
+            field_row(4, "API key", grok_key_input);
+            rows.push_back(text(""));
+            section("Grok (subscription)");
+            {
+                const bool in = grok_oauth::logged_in();
+                const std::string act = state.grok_login_busy
+                    ? "signing in..."
+                    : (in ? "Enter: log out" : "Enter: sign in with X / SuperGrok");
+                Element row = hbox({
+                    text(mark(kConnGrokSubRow) + "Account") | size(WIDTH, EQUAL, 13)
+                        | (state.settings_sel == kConnGrokSubRow ? (color(t.accent) | bold)
+                                                                 : color(t.text_dim)),
+                    text(in ? " connected " : " not connected ")
+                        | color(t.bg) | bgcolor(in ? t.ok : t.text_dim) | bold,
+                    text("  " + act) | color(t.text_dim),
+                });
+                if (state.settings_sel == kConnGrokSubRow) {
+                    row = row | focus;
+                }
+                rows.push_back(row);
+            }
+            rows.push_back(text("      SuperGrok / X Premium+ subscription - no API key needed.")
+                           | color(t.text_dim));
+            rows.push_back(text(""));
+            section("Custom (OpenAI-compatible)");
+            field_row(6, "Base URL", custom_base_input);
+            field_row(7, "API key", custom_key_input);
+            rows.push_back(text(""));
+            Element saverow = hbox({text(mark(kConnSaveRow)), save->Render()});
+            if (state.settings_sel == kConnSaveRow) {
+                saverow = saverow | focus;  // scroll to Save when it's selected
+            }
+            rows.push_back(saverow);
+            rows.push_back(text(""));
+            rows.push_back(text("   Keys are saved in config.json.") | color(t.text_dim));
+
+            // A focused field (or the marked Save row) carries focus, so the
+            // frame scrolls to keep the selected row visible.
+            rows = {vbox(std::move(rows)) | yframe | vscroll_indicator | flex};
         } else if (state.settings_view == 2 && state.theme_editing) {  // Theme editor
             rows.push_back(theme_editor_view(state) | flex);
         } else if (state.settings_view == 2) {  // Themes list
@@ -1591,8 +1794,9 @@ static Component build_settings_view(AppState& state, ScreenInteractive& screen)
             auto kv = [&](const std::string& k, Element v) {
                 return hbox({text("   " + k) | color(t.text_dim) | size(WIDTH, EQUAL, 18), v});
             };
-            rows.push_back(kv("Model", text(state.config.model) | color(t.model) | bold));
-            rows.push_back(kv("Host", text(state.config.host) | color(t.text)));
+            rows.push_back(kv("New chats use",
+                              text(state.config.provider + " / " + state.config.model)
+                                  | color(t.model) | bold));
             rows.push_back(kv("Theme", text(state.config.theme) | color(t.text)));
             rows.push_back(kv("Active chats", text(std::to_string(state.conversations.size())) | color(t.text)));
             rows.push_back(kv("Archived chats", text(std::to_string(state.archived.size())) | color(t.text)));
@@ -1619,34 +1823,53 @@ static Component build_settings_view(AppState& state, ScreenInteractive& screen)
         }
 
         Element doc = vbox(std::move(rows)) | flex;
-        if (host_input->Focused() || prompt_input->Focused()) {
+        const bool editing =
+            host_input->Focused() || prompt_input->Focused() ||
+            openai_key_input->Focused() || anthropic_key_input->Focused() ||
+            gemini_key_input->Focused() || grok_key_input->Focused() ||
+            custom_base_input->Focused() || custom_key_input->Focused();
+        if (editing) {
             return doc;  // the focused text field owns the cursor
         }
-        if (state.settings_view == 2) {
-            return doc;  // the selected theme row already carries focus for its scroll frame
+        if (state.settings_view == 1 || state.settings_view == 2) {
+            return doc;  // the selected row already carries focus for its scroll frame
         }
         // Park focus so no stray cursor shows on the other read-only rows.
         return doc | focus;
     });
 
-    return CatchEvent(view, [host_input, prompt_input, save, container, &state](Event e) {
-        // Keep a text field focused only on the row that owns one (Connections host,
-        // General prompt), so other subviews never capture typing or a cursor.
+    return CatchEvent(view, [=, &state, &screen](Event e) {
+        // Keep a text field focused only on the row that owns one (a Connections
+        // field, the General prompt), so other subviews never capture a cursor.
         Component active = save;
-        if (state.settings_view == 1 && state.settings_sel == 0) {
-            active = host_input;
+        if (state.settings_view == 1) {
+            if (Component in = conn_input_for(state.settings_sel)) {
+                active = in;
+            }
         } else if (state.settings_view == 0 && state.settings_sel == 1) {
             active = prompt_input;
         }
         container->SetActiveChild(active);
 
-        if (state.settings_view == 1) {  // Connections: host (0), Save (1)
-            if (e == Event::ArrowDown || e == Event::ArrowUp) {
-                state.settings_sel ^= 1;
-                container->SetActiveChild(state.settings_sel == 0 ? host_input : save);
+        if (state.settings_view == 1) {  // Connections: fields, Grok action (5), Save (8)
+            const int nrows = kConnSaveRow + 1;
+            int& sel = state.settings_sel;
+            if (sel >= nrows) {
+                sel = 0;
+            }
+            if (e == Event::ArrowDown) { sel = (sel + 1) % nrows; return true; }
+            if (e == Event::ArrowUp)   { sel = (sel + nrows - 1) % nrows; return true; }
+            if (sel == kConnGrokSubRow && e == Event::Return) {  // Grok subscription
+                if (grok_oauth::logged_in()) {
+                    grok_oauth::logout();
+                    state.status = "signed out of Grok";
+                    refresh_models(state, screen);
+                } else if (!state.grok_login_busy) {
+                    start_grok_login(state, screen);
+                }
                 return true;
             }
-            return false;  // host edits itself; Save's Enter runs the save
+            return false;  // fields edit themselves (Left at start returns to views); Save runs on Enter
         }
         if (state.settings_view == 2) {  // Themes
             if (state.theme_editing) {
@@ -2054,7 +2277,13 @@ ftxui::Component build_app(AppState& state, ScreenInteractive& screen) {
                        : "↑/↓: navigate   →: enter view   Ctrl+C: quit";
         } else if (state.view == 1) {
             if (state.settings_view == 1) {
-                hint = "←: views   ↑/↓: move   Enter: save   Ctrl+C: quit";
+                if (state.settings_sel == kConnSaveRow) {
+                    hint = "←: views   ↑/↓: move   Enter: save   Ctrl+C: quit";
+                } else if (state.settings_sel == kConnGrokSubRow) {
+                    hint = "←: views   ↑/↓: move   Enter: sign in / out   Ctrl+C: quit";
+                } else {
+                    hint = "Type here   ↑/↓: fields   ←: back at start   Ctrl+C: quit";
+                }
             } else if (state.settings_view == 2) {
                 hint = "←: views   ↑/↓: choose   Enter: apply / add   e: edit custom   Ctrl+C: quit";
             } else if (state.settings_view == 3) {

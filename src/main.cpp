@@ -7,6 +7,7 @@
 
 int main() {
     AppState state;
+    load_themes();  // load theme files (seeding the built-ins on first run)
     state.config = load_config();
     state.theme = theme_by_name(state.config.theme);
     storage::load(state.conversations, state.archived);

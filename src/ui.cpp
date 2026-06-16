@@ -10,6 +10,8 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <functional>
 #include <iostream>
@@ -981,6 +983,460 @@ static Component build_chat_view(AppState& state, ScreenInteractive& screen) {
     });
 }
 
+// The distinct colors a theme actually uses, as small swatches - a live preview
+// of the palette in the Themes picker. Surfaces first, then the accent hues;
+// exact duplicates are dropped so each row shows only the theme's real, unique
+// colors.
+static Elements theme_swatch(const Theme& th) {
+    std::vector<Rgb> seen;
+    Elements sw;
+    for (const auto& slot : theme_palette()) {  // the editable palette = what you see
+        const Rgb c = th.*(slot.field);
+        if (std::find(seen.begin(), seen.end(), c) != seen.end()) {
+            continue;
+        }
+        seen.push_back(c);
+        sw.push_back(text("  ") | bgcolor(c));
+    }
+    return sw;
+}
+
+static std::string hex_of(const Rgb& c) {
+    char buf[8];
+    std::snprintf(buf, sizeof(buf), "#%02X%02X%02X", c.r & 0xFF, c.g & 0xFF, c.b & 0xFF);
+    return buf;
+}
+
+static Rgb hsv_to_rgb(float h, float s, float v) {
+    h = std::fmod(std::fmod(h, 360.0f) + 360.0f, 360.0f);
+    s = std::clamp(s, 0.0f, 1.0f);
+    v = std::clamp(v, 0.0f, 1.0f);
+    const float c = v * s;
+    const float x = c * (1.0f - std::fabs(std::fmod(h / 60.0f, 2.0f) - 1.0f));
+    const float m = v - c;
+    float r = 0, g = 0, b = 0;
+    if (h < 60)       { r = c; g = x; }
+    else if (h < 120) { r = x; g = c; }
+    else if (h < 180) { g = c; b = x; }
+    else if (h < 240) { g = x; b = c; }
+    else if (h < 300) { r = x; b = c; }
+    else              { r = c; b = x; }
+    auto to8 = [](float f) { return static_cast<int>(std::lround((f) * 255.0f)); };
+    return {to8(r + m), to8(g + m), to8(b + m)};
+}
+
+static void rgb_to_hsv(const Rgb& c, float& h, float& s, float& v) {
+    const float r = c.r / 255.0f, g = c.g / 255.0f, b = c.b / 255.0f;
+    const float mx = std::max(r, std::max(g, b));
+    const float mn = std::min(r, std::min(g, b));
+    const float d = mx - mn;
+    v = mx;
+    s = (mx <= 0.0f) ? 0.0f : d / mx;
+    if (d <= 0.0f) {
+        return;  // achromatic: leave the previous hue in place
+    }
+    if (mx == r)      { h = 60.0f * std::fmod((g - b) / d, 6.0f); }
+    else if (mx == g) { h = 60.0f * ((b - r) / d + 2.0f); }
+    else              { h = 60.0f * ((r - g) / d + 4.0f); }
+    if (h < 0) {
+        h += 360.0f;
+    }
+}
+
+// A smooth hue/saturation color wheel at brightness v, with a marker at the
+// current (h, s). Rendered with the half-block trick: each character cell is the
+// glyph "▀" carrying two independently-colored pixels (fg = top, bg = bottom),
+// which doubles vertical resolution. Terminal cells are ~2x taller than wide, so
+// these half-pixels are roughly square and the disk reads round.
+static Element color_wheel(float h, float s, float v) {
+    constexpr int PW = 26, PH = 26;  // pixels (PH even); rendered in PW cols x PH/2 rows
+    constexpr float kPi = 3.14159265f;
+    const float cx = (PW - 1) / 2.0f, cy = (PH - 1) / 2.0f;
+    const float rad = std::min(cx, cy);
+    const float vv = std::max(v, 0.5f);  // keep the wheel navigable even for dark colors
+    const float hr = h * kPi / 180.0f;
+    const int mpx = static_cast<int>(std::lround(cx + std::clamp(s, 0.0f, 1.0f) * std::cos(hr) * rad));
+    const int mpy = static_cast<int>(std::lround(cy - std::clamp(s, 0.0f, 1.0f) * std::sin(hr) * rad));
+
+    auto sample = [&](int px, int py, bool& inside) -> Rgb {
+        const float nx = (px - cx) / rad;
+        const float ny = -(py - cy) / rad;
+        const float r = std::sqrt(nx * nx + ny * ny);
+        if (r > 1.0f) {
+            inside = false;
+            return {};
+        }
+        inside = true;
+        float hue = std::atan2(ny, nx) * 180.0f / kPi;
+        if (hue < 0) {
+            hue += 360.0f;
+        }
+        return hsv_to_rgb(hue, std::min(r, 1.0f), vv);
+    };
+
+    Elements rows;
+    for (int row = 0; row < PH / 2; ++row) {
+        const int ty = row * 2, by = row * 2 + 1;
+        Elements cells;
+        for (int px = 0; px < PW; ++px) {
+            if (px == mpx && (ty == mpy || by == mpy)) {  // the selection marker
+                bool in = false;
+                const Rgb under = sample(px, mpy, in);
+                const bool light = (under.r * 30 + under.g * 59 + under.b * 11) / 100 > 140;
+                cells.push_back(text("+") | bold | color(light ? Rgb{0, 0, 0} : Rgb{255, 255, 255}) |
+                                bgcolor(in ? under : Rgb{0, 0, 0}));
+                continue;
+            }
+            bool ti = false, bi = false;
+            const Rgb top = sample(px, ty, ti);
+            const Rgb bot = sample(px, by, bi);
+            if (ti && bi) {
+                cells.push_back(text("▀") | color(top) | bgcolor(bot));
+            } else if (ti) {
+                cells.push_back(text("▀") | color(top));
+            } else if (bi) {
+                cells.push_back(text("▄") | color(bot));
+            } else {
+                cells.push_back(text(" "));
+            }
+        }
+        rows.push_back(hbox(std::move(cells)));
+    }
+    return vbox(std::move(rows));
+}
+
+// A brightness ramp at the current hue/saturation, with a caret under v.
+static Element value_bar(float h, float s, float v) {
+    constexpr int N = 14;
+    Elements cells;
+    for (int i = 0; i < N; ++i) {
+        cells.push_back(text(" ") | bgcolor(hsv_to_rgb(h, s, (i + 1) / static_cast<float>(N))));
+    }
+    Elements caret;
+    const int pos = std::clamp(static_cast<int>(std::lround(v * N)) - 1, 0, N - 1);
+    for (int i = 0; i < N; ++i) {
+        caret.push_back(text(i == pos ? "^" : " "));
+    }
+    return vbox({hbox(std::move(cells)), hbox(std::move(caret))});
+}
+
+// Set the editor's H/S/V from the color of the focused palette slot.
+static void sync_hsv_from_slot(AppState& state) {
+    const auto& pal = theme_palette();
+    const int i = state.theme_edit_sel - 1;
+    if (i < 0 || i >= static_cast<int>(pal.size())) {
+        return;
+    }
+    rgb_to_hsv(state.theme_draft.*(pal[i].field), state.edit_h, state.edit_s, state.edit_v);
+}
+
+// Push the (finalized) draft into the live theme so the whole UI previews it.
+static void apply_theme_preview(AppState& state) {
+    Theme t = state.theme_draft;
+    finalize_theme(t);
+    state.theme = t;
+}
+
+// Write the editor's current H/S/V back into the focused slot and re-preview.
+static void slot_from_hsv(AppState& state) {
+    const auto& pal = theme_palette();
+    const int i = state.theme_edit_sel - 1;
+    if (i < 0 || i >= static_cast<int>(pal.size())) {
+        return;
+    }
+    state.theme_draft.*(pal[i].field) = hsv_to_rgb(state.edit_h, state.edit_s, state.edit_v);
+    apply_theme_preview(state);
+}
+
+// Open the editor: editing an existing custom theme, or (existing == nullptr) a
+// new one seeded from the currently applied theme.
+static void begin_theme_edit(AppState& state, const Theme* existing) {
+    state.theme_prev = state.config.theme;
+    if (existing) {
+        state.theme_draft = *existing;
+        state.theme_edit_orig = existing->name;
+    } else {
+        state.theme_draft = state.theme;  // start from what's on screen
+        state.theme_draft.name.clear();
+        state.theme_edit_orig.clear();
+    }
+    state.theme_editing = true;
+    state.theme_edit_sel = 0;
+    state.theme_name_cursor = static_cast<int>(state.theme_draft.name.size());
+    state.theme_hex = false;
+    state.hex_buf.clear();
+    apply_theme_preview(state);
+}
+
+static void cancel_theme_edit(AppState& state) {
+    state.theme_editing = false;
+    state.theme_hex = false;
+    state.theme = theme_by_name(state.theme_prev);  // drop the live preview
+}
+
+// Save the draft (creating, overwriting, or renaming a custom theme) and apply
+// it. Keeps the editor open with a message if the name is missing or reserved.
+static void commit_theme(AppState& state) {
+    Theme t = state.theme_draft;
+    if (t.name.empty()) {
+        state.status = "name the theme before saving";
+        return;
+    }
+    if (is_builtin(t.name)) {
+        state.status = "\"" + t.name + "\" is a built-in name - pick another";
+        return;
+    }
+    finalize_theme(t);
+    if (!state.theme_edit_orig.empty() && state.theme_edit_orig != t.name) {
+        delete_theme(state.theme_edit_orig);  // a rename: drop the old file
+    }
+    save_theme(t);
+    state.config.theme = t.name;
+    save_config(state.config);
+    state.theme = theme_by_name(t.name);
+    state.theme_editing = false;
+    state.theme_hex = false;
+    state.status = "saved theme " + t.name;
+}
+
+static bool parse_hex_ui(const std::string& in, Rgb& out) {
+    const std::string h = (!in.empty() && in[0] == '#') ? in.substr(1) : in;
+    if (h.size() != 6) {
+        return false;
+    }
+    auto val = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+    };
+    int d[6];
+    for (int i = 0; i < 6; ++i) {
+        d[i] = val(h[i]);
+        if (d[i] < 0) {
+            return false;
+        }
+    }
+    out = {d[0] * 16 + d[1], d[2] * 16 + d[3], d[4] * 16 + d[5]};
+    return true;
+}
+
+// The custom-theme editor, shown in place of the theme list while editing. Left
+// column: name, the editable palette slots, Save/Cancel. Right column: the color
+// wheel + value bar + hex for the focused slot. The whole UI (this pane included)
+// is already previewing the draft, so edits are seen live.
+static Element theme_editor_view(AppState& state) {
+    const Theme& t = state.theme;  // == the live draft preview
+    const auto& pal = theme_palette();
+    auto mark = [&](int i) { return state.theme_edit_sel == i ? std::string(" ▶ ") : std::string("   "); };
+
+    Elements left;
+    left.push_back(text(state.theme_edit_orig.empty() ? "  New custom theme" : "  Edit theme")
+                   | color(t.accent) | bold);
+    left.push_back(text(""));
+
+    // Name field with a block cursor when focused.
+    {
+        const bool on = (state.theme_edit_sel == 0);
+        const std::string& nm = state.theme_draft.name;
+        Element field;
+        if (nm.empty() && !on) {
+            field = text("(unnamed)") | color(t.text_dim);
+        } else {
+            const int cur = std::clamp(state.theme_name_cursor, 0, static_cast<int>(nm.size()));
+            const bool at_end = cur >= static_cast<int>(nm.size());
+            const std::string cg = at_end ? " " : nm.substr(cur, glyph_next(nm, cur) - cur);
+            Element cursor = on ? (text(cg) | color(t.text) | focusCursorBlockBlinking)
+                                : (text(cg) | color(t.text));
+            field = hbox({
+                text(nm.substr(0, cur)) | color(t.text),
+                cursor,
+                text(at_end ? "" : nm.substr(glyph_next(nm, cur))) | color(t.text),
+            });
+        }
+        left.push_back(hbox({
+            text(mark(0) + "Name  ") | (on ? (color(t.accent) | bold) : color(t.text_dim)),
+            hbox({text(" "), field, filler()}) | bgcolor(t.panel_alt) | size(WIDTH, EQUAL, 20),
+        }));
+    }
+    left.push_back(text(""));
+
+    for (int i = 0; i < static_cast<int>(pal.size()); ++i) {
+        const int sel = i + 1;
+        const bool on = (state.theme_edit_sel == sel);
+        const Rgb c = state.theme_draft.*(pal[i].field);
+        left.push_back(hbox({
+            text(mark(sel) + pal[i].label) | size(WIDTH, EQUAL, 16)
+                | (on ? (color(t.select) | bold) : color(t.text)),
+            text("  ") | bgcolor(c),
+            text("  ") | bgcolor(c),
+            text("  " + hex_of(c)) | color(t.text_dim),
+        }));
+    }
+    left.push_back(text(""));
+
+    {
+        const int ns = static_cast<int>(pal.size());
+        auto btn = [&](const std::string& label, int sel, Rgb cc) {
+            Element e = text(" " + label + " ");
+            return (state.theme_edit_sel == sel) ? (e | color(t.bg) | bgcolor(cc) | bold)
+                                                 : (e | color(cc) | bgcolor(t.panel_alt));
+        };
+        left.push_back(hbox({text("   "), btn("Save", ns + 1, t.accent),
+                             text("  "), btn("Cancel", ns + 2, t.text_dim)}));
+    }
+
+    Elements right;
+    if (state.theme_edit_sel >= 1 && state.theme_edit_sel <= static_cast<int>(pal.size())) {
+        const int i = state.theme_edit_sel - 1;
+        const Rgb c = state.theme_draft.*(pal[i].field);
+        right.push_back(text("  " + std::string(pal[i].label)) | color(t.accent) | bold);
+        right.push_back(text(""));
+        right.push_back(color_wheel(state.edit_h, state.edit_s, state.edit_v));
+        right.push_back(text(""));
+        right.push_back(hbox({text(" light ") | color(t.text_dim),
+                              value_bar(state.edit_h, state.edit_s, state.edit_v)}));
+        right.push_back(text(""));
+        if (state.theme_hex) {
+            right.push_back(hbox({text(" hex  ") | color(t.text_dim),
+                                  text(state.hex_buf + "_") | color(t.text) | bgcolor(t.panel_alt)}));
+        } else {
+            right.push_back(hbox({text(" hex  ") | color(t.text_dim), text(hex_of(c)) | color(t.text),
+                                  text("    "), text("    ") | bgcolor(c)}));
+        }
+    } else {
+        right.push_back(text("  Select a color to open the wheel") | color(t.text_dim));
+    }
+
+    return hbox({
+        vbox(std::move(left)) | size(WIDTH, EQUAL, 30),
+        text("  "),
+        vbox(std::move(right)),
+    });
+}
+
+// Modal key handling for the theme editor. Returns true for every event (the
+// editor captures all input until Save or Cancel).
+static bool handle_theme_editor(AppState& state, Event e) {
+    const auto& pal = theme_palette();
+    const int nslot = static_cast<int>(pal.size());
+    const int nrows = 1 + nslot + 2;  // name + slots + Save + Cancel
+    const int save_row = 1 + nslot;
+    const int cancel_row = save_row + 1;
+
+    if (state.theme_hex) {  // typing a hex code for the focused slot
+        if (e == Event::Return) {
+            Rgb c;
+            const int i = state.theme_edit_sel - 1;
+            if (parse_hex_ui(state.hex_buf, c) && i >= 0 && i < nslot) {
+                state.theme_draft.*(pal[i].field) = c;
+                rgb_to_hsv(c, state.edit_h, state.edit_s, state.edit_v);
+                apply_theme_preview(state);
+            }
+            state.theme_hex = false;
+            return true;
+        }
+        if (e == Event::Escape) {
+            state.theme_hex = false;
+            return true;
+        }
+        if (e == Event::Backspace) {
+            if (!state.hex_buf.empty()) {
+                state.hex_buf.pop_back();
+            }
+            return true;
+        }
+        if (e.is_character() && e.character().size() == 1) {
+            const char c = e.character()[0];
+            if ((c == '#' || std::isxdigit((unsigned char)c)) && state.hex_buf.size() < 7) {
+                state.hex_buf += c;
+            }
+        }
+        return true;
+    }
+
+    if (e == Event::Escape) {
+        cancel_theme_edit(state);
+        return true;
+    }
+    if (e == Event::ArrowUp) {
+        state.theme_edit_sel = (state.theme_edit_sel + nrows - 1) % nrows;
+        sync_hsv_from_slot(state);
+        return true;
+    }
+    if (e == Event::ArrowDown) {
+        state.theme_edit_sel = (state.theme_edit_sel + 1) % nrows;
+        sync_hsv_from_slot(state);
+        return true;
+    }
+
+    const int sel = state.theme_edit_sel;
+    if (sel == 0) {  // name field
+        std::string& nm = state.theme_draft.name;
+        int& cur = state.theme_name_cursor;
+        cur = std::clamp(cur, 0, static_cast<int>(nm.size()));
+        if (e == Event::Return) {
+            state.theme_edit_sel = 1;
+            sync_hsv_from_slot(state);
+        } else if (e == Event::Backspace) {
+            if (cur > 0) {
+                const int p = glyph_prev(nm, cur);
+                nm.erase(p, cur - p);
+                cur = p;
+            }
+        } else if (e == Event::ArrowLeft) {
+            cur = glyph_prev(nm, cur);
+        } else if (e == Event::ArrowRight) {
+            cur = glyph_next(nm, cur);
+        } else if (e.is_character()) {
+            nm.insert(cur, e.character());
+            cur += static_cast<int>(e.character().size());
+        }
+        return true;
+    }
+    if (sel == save_row) {
+        if (e == Event::Return) {
+            commit_theme(state);
+        }
+        return true;
+    }
+    if (sel == cancel_row) {
+        if (e == Event::Return) {
+            cancel_theme_edit(state);
+        }
+        return true;
+    }
+    // A color slot: adjust the wheel / brightness, or open hex entry.
+    if (e == Event::Return) {
+        state.theme_hex = true;
+        state.hex_buf = hex_of(state.theme_draft.*(pal[sel - 1].field));
+        return true;
+    }
+    if (e == Event::ArrowLeft) {
+        state.edit_h -= 8.0f;
+        slot_from_hsv(state);
+    } else if (e == Event::ArrowRight) {
+        state.edit_h += 8.0f;
+        slot_from_hsv(state);
+    } else if (e.is_character()) {
+        const std::string ch = e.character();
+        if (ch == "[") {
+            state.edit_s = std::clamp(state.edit_s - 0.05f, 0.0f, 1.0f);
+            slot_from_hsv(state);
+        } else if (ch == "]") {
+            state.edit_s = std::clamp(state.edit_s + 0.05f, 0.0f, 1.0f);
+            slot_from_hsv(state);
+        } else if (ch == "-" || ch == "_") {
+            state.edit_v = std::clamp(state.edit_v - 0.05f, 0.0f, 1.0f);
+            slot_from_hsv(state);
+        } else if (ch == "=" || ch == "+") {
+            state.edit_v = std::clamp(state.edit_v + 0.05f, 0.0f, 1.0f);
+            slot_from_hsv(state);
+        }
+    }
+    return true;
+}
+
 static Component build_settings_view(AppState& state, ScreenInteractive& screen) {
     InputOption line;
     line.multiline = false;
@@ -1031,25 +1487,61 @@ static Component build_settings_view(AppState& state, ScreenInteractive& screen)
             }));
             rows.push_back(text(""));
             rows.push_back(text("   Pick a model with /model in chat.") | color(t.text_dim));
-        } else if (state.settings_view == 2) {  // Themes
-            rows.push_back(text("  Themes") | color(t.accent) | bold);
-            rows.push_back(text(""));
+        } else if (state.settings_view == 2 && state.theme_editing) {  // Theme editor
+            rows.push_back(theme_editor_view(state) | flex);
+        } else if (state.settings_view == 2) {  // Themes list
             const auto& all = themes();
-            for (int i = 0; i < static_cast<int>(all.size()); ++i) {
-                const bool cur = (all[i].name == state.config.theme);
-                rows.push_back(hbox({
-                    text(mark(i) + all[i].name)
-                        | (state.settings_sel == i ? (color(t.select) | bold) : color(t.text)),
-                    text("   "),
-                    text("  ") | bgcolor(all[i].accent),
-                    text("  ") | bgcolor(all[i].select),
-                    text("  ") | bgcolor(all[i].ok),
-                    text("  ") | bgcolor(all[i].err),
-                    text(cur ? "  (current)" : "") | color(t.text_dim),
-                }));
+            int builtins = 0;
+            for (const auto& th : all) {
+                if (is_builtin(th.name)) {
+                    builtins++;
+                }
             }
-            rows.push_back(text(""));
-            rows.push_back(text("   Enter to apply a theme.") | color(t.text_dim));
+            // One theme row: name (fixed-width) + palette swatches; nav index `sel`.
+            auto theme_row = [&](int idx, int sel) {
+                const bool on = (state.settings_sel == sel);
+                const bool cur = (all[idx].name == state.config.theme);
+                Elements row{
+                    text(mark(sel) + all[idx].name) | size(WIDTH, EQUAL, 18)
+                        | (on ? (color(t.select) | bold) : color(t.text)),
+                    text("   "),
+                };
+                for (Element& s : theme_swatch(all[idx])) {
+                    row.push_back(std::move(s));
+                }
+                if (cur) {
+                    row.push_back(text("  (current)") | color(t.text_dim));
+                }
+                Element r = hbox(std::move(row));
+                if (on) {
+                    r = r | focus;  // keep the selection in view as the list scrolls
+                }
+                return r;
+            };
+
+            Elements list;
+            list.push_back(text("  Themes") | color(t.accent) | bold);
+            for (int i = 0; i < builtins; ++i) {
+                list.push_back(theme_row(i, i));
+            }
+            list.push_back(text(""));
+            list.push_back(text("  Custom themes") | color(t.accent) | bold);
+            {
+                const bool on = (state.settings_sel == builtins);
+                Element add = text(mark(builtins) + "+ Add new theme")
+                              | (on ? (color(t.accent) | bold) : color(t.text_dim));
+                list.push_back(on ? (add | focus) : add);
+            }
+            const int customs = static_cast<int>(all.size()) - builtins;
+            if (customs == 0) {
+                list.push_back(text("   (none yet - add one above)") | color(t.text_dim));
+            } else {
+                for (int i = 0; i < customs; ++i) {
+                    list.push_back(theme_row(builtins + i, builtins + 1 + i));
+                }
+            }
+            rows.push_back(vbox(std::move(list)) | yframe | vscroll_indicator | flex);
+            rows.push_back(text("   Enter: apply / add    e: edit a custom theme") | color(t.text_dim));
         } else if (state.settings_view == 3) {  // Archive
             rows.push_back(text("  Archived chats") | color(t.accent) | bold);
             rows.push_back(text(""));
@@ -1086,9 +1578,14 @@ static Component build_settings_view(AppState& state, ScreenInteractive& screen)
         }
 
         Element doc = vbox(std::move(rows)) | flex;
-        // Hide the terminal cursor unless the host field is being edited, so it
-        // doesn't park in the corner on the other rows.
-        return host_input->Focused() ? doc : (doc | focus);
+        if (host_input->Focused()) {
+            return doc;  // the host field owns the cursor
+        }
+        if (state.settings_view == 2) {
+            return doc;  // the selected theme row already carries focus for its scroll frame
+        }
+        // Park focus so no stray cursor shows on the other read-only rows.
+        return doc | focus;
     });
 
     return CatchEvent(view, [host_input, save, container, &state](Event e) {
@@ -1105,16 +1602,43 @@ static Component build_settings_view(AppState& state, ScreenInteractive& screen)
             return false;  // host edits itself; Save's Enter runs the save
         }
         if (state.settings_view == 2) {  // Themes
-            const int n = std::max(1, static_cast<int>(themes().size()));
-            if (e == Event::ArrowDown) { state.settings_sel = (state.settings_sel + 1) % n; return true; }
-            if (e == Event::ArrowUp)   { state.settings_sel = (state.settings_sel + n - 1) % n; return true; }
+            if (state.theme_editing) {
+                return handle_theme_editor(state, e);
+            }
+            const auto& all = themes();
+            int builtins = 0;
+            for (const auto& th : all) {
+                if (is_builtin(th.name)) {
+                    builtins++;
+                }
+            }
+            const int customs = static_cast<int>(all.size()) - builtins;
+            const int nrows = builtins + 1 + customs;  // built-ins + add button + customs
+            int& sel = state.settings_sel;
+            if (sel >= nrows) {
+                sel = 0;
+            }
+            if (e == Event::ArrowDown) { sel = (sel + 1) % nrows; return true; }
+            if (e == Event::ArrowUp)   { sel = (sel + nrows - 1) % nrows; return true; }
             if (e == Event::Return) {
-                const auto& all = themes();
-                const Theme& th = all[std::clamp(state.settings_sel, 0, static_cast<int>(all.size()) - 1)];
-                state.config.theme = th.name;
-                state.theme = th;  // apply live everywhere that reads state.theme
-                save_config(state.config);
-                state.status = "theme set to " + th.name;
+                if (sel == builtins) {  // the "+ Add new theme" row
+                    begin_theme_edit(state, nullptr);
+                    return true;
+                }
+                const int idx = (sel < builtins) ? sel : sel - 1;  // map past the add button
+                if (idx >= 0 && idx < static_cast<int>(all.size())) {
+                    state.config.theme = all[idx].name;
+                    save_config(state.config);
+                    state.theme = theme_by_name(all[idx].name);
+                    state.status = "theme set to " + all[idx].name;
+                }
+                return true;
+            }
+            if (e.is_character() && e.character() == "e" && sel > builtins) {  // edit a custom
+                const int idx = sel - 1;
+                if (idx >= 0 && idx < static_cast<int>(all.size()) && !is_builtin(all[idx].name)) {
+                    begin_theme_edit(state, &all[idx]);
+                }
                 return true;
             }
             return false;
@@ -1440,7 +1964,18 @@ ftxui::Component build_app(AppState& state, ScreenInteractive& screen) {
 
         // Context-aware key hints: surface the keys relevant to what's focused.
         std::string hint;
-        if (state.popup == 3 || state.popup == 4) {
+        if (state.theme_editing) {
+            const int nslot = static_cast<int>(theme_palette().size());
+            if (state.theme_hex) {
+                hint = "Type a hex code   Enter: set   Esc: cancel";
+            } else if (state.theme_edit_sel == 0) {
+                hint = "Type a name   ↑/↓: fields   Esc: cancel";
+            } else if (state.theme_edit_sel >= 1 && state.theme_edit_sel <= nslot) {
+                hint = "←/→ hue   [ / ] sat   - / = light   Enter: type hex   ↑/↓: fields   Esc: cancel";
+            } else {
+                hint = "Enter: confirm   ↑/↓: fields   Esc: cancel";
+            }
+        } else if (state.popup == 3 || state.popup == 4) {
             hint = "Type to rename   Enter: save   Esc: cancel";
         } else if (state.popup) {
             hint = "←/→: choose   Enter: confirm   Esc: cancel";
@@ -1453,7 +1988,7 @@ ftxui::Component build_app(AppState& state, ScreenInteractive& screen) {
             if (state.settings_view == 1) {
                 hint = "←: views   ↑/↓: move   Enter: save   Ctrl+C: quit";
             } else if (state.settings_view == 2) {
-                hint = "←: views   ↑/↓: choose   Enter: apply theme   Ctrl+C: quit";
+                hint = "←: views   ↑/↓: choose   Enter: apply / add   e: edit custom   Ctrl+C: quit";
             } else if (state.settings_view == 3) {
                 hint = (state.settings_sel >= 1)
                            ? "←: views   ↑/↓: move   Enter: manage chat   Ctrl+C: quit"

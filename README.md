@@ -200,3 +200,12 @@ the system prompt and roles where their APIs expect them.)
   shutdown.
 - Markdown re-renders every frame; worth caching per message once conversations
   get long.
+
+## License
+
+Hearth is released under the [MIT License](LICENSE) - do whatever you like with
+it, just keep the copyright and license notice. Copyright (c) 2026 phanzor.
+
+The Grok subscription sign-in (`src/grok_oauth.*`) adapts the xAI OAuth flow from
+[Hermes Agent](https://github.com/NousResearch/hermes-agent) by Nous Research,
+which is MIT-licensed.

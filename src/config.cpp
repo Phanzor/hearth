@@ -39,6 +39,12 @@ Config load_config() {
         if (j.contains("theme")) {
             c.theme = j["theme"].get<std::string>();
         }
+        if (j.contains("system_prompt")) {
+            c.system_prompt = j["system_prompt"].get<std::string>();
+        }
+        if (j.contains("system_prompt_enabled")) {
+            c.system_prompt_enabled = j["system_prompt_enabled"].get<bool>();
+        }
     } catch (const std::exception&) {
         // Corrupt config: fall back to defaults rather than crashing.
     }
@@ -48,7 +54,11 @@ Config load_config() {
 bool save_config(const Config& c) {
     try {
         fs::create_directories(config_dir());
-        nlohmann::json j{{"host", c.host}, {"model", c.model}, {"theme", c.theme}};
+        nlohmann::json j{{"host", c.host},
+                         {"model", c.model},
+                         {"theme", c.theme},
+                         {"system_prompt", c.system_prompt},
+                         {"system_prompt_enabled", c.system_prompt_enabled}};
         std::ofstream out(config_path());
         if (!out) {
             return false;

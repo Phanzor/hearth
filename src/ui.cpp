@@ -341,6 +341,9 @@ static void send_message(AppState& state, ScreenInteractive& screen) {
     storage::save(c, false);  // persist the user turn before the reply arrives
 
     std::vector<ollama::ChatMessage> request;
+    if (state.config.system_prompt_enabled && !state.config.system_prompt.empty()) {
+        request.push_back({"system", state.config.system_prompt});
+    }
     for (size_t i = 0; i + 1 < c.messages.size(); ++i) {
         request.push_back({c.messages[i].role, c.messages[i].content});
     }
@@ -1452,14 +1455,23 @@ static Component build_settings_view(AppState& state, ScreenInteractive& screen)
     line.transform = plain_input(state.theme.text);
     auto host_input = Input(&state.config.host, "http://localhost:11434", line);
 
+    InputOption area;
+    area.multiline = true;
+    area.transform = plain_input(state.theme.text);
+    auto prompt_input = Input(&state.config.system_prompt,
+                              "Describe how the assistant should behave...", area);
+
     // Save highlights from our focus index (not its own focus): it also parks the
-    // container's focus for the subviews whose rows are drawn virtually.
+    // container's focus for the subviews whose rows are drawn virtually. It sits at
+    // row 1 in Connections and row 2 in General, so both spellings highlight it.
     ButtonOption bopt;
     bopt.transform = [&state](const EntryState&) {
         const Theme& t = state.theme;
         Element e = text(" Save ");
-        return (state.settings_sel == 1) ? (e | color(t.bg) | bgcolor(t.accent) | bold)
-                                         : (e | color(t.accent) | bgcolor(t.panel_alt));
+        const bool on = (state.settings_view == 1 && state.settings_sel == 1) ||
+                        (state.settings_view == 0 && state.settings_sel == 2);
+        return on ? (e | color(t.bg) | bgcolor(t.accent) | bold)
+                  : (e | color(t.accent) | bgcolor(t.panel_alt));
     };
     auto save = Button(
         "Save",
@@ -1469,12 +1481,12 @@ static Component build_settings_view(AppState& state, ScreenInteractive& screen)
         },
         bopt);
 
-    auto container = Container::Vertical({host_input, save});
+    auto container = Container::Vertical({host_input, prompt_input, save});
 
     // The content shown depends on which subview the sidebar tree has hovered
     // (state.settings_view). General is a read-only overview; Connections owns
     // the host field + Save; Themes is a picker; Archive manages archived chats.
-    auto view = Renderer(container, [host_input, save, &state] {
+    auto view = Renderer(container, [host_input, prompt_input, save, &state] {
         const Theme& t = state.theme;
         auto mark = [&](int i) { return (state.settings_sel == i) ? std::string(" ▶ ") : std::string("   "); };
 
@@ -1571,7 +1583,7 @@ static Component build_settings_view(AppState& state, ScreenInteractive& screen)
                                    | (state.settings_sel == 1 + i ? (color(t.select) | bold) : color(t.text)));
                 }
             }
-        } else {  // General overview
+        } else {  // General overview + the global system prompt
             rows.push_back(text("  Settings") | color(t.accent) | bold);
             rows.push_back(text(""));
             rows.push_back(text("   A private, local AI workspace. Choose a section on the left.") | color(t.text_dim));
@@ -1584,11 +1596,31 @@ static Component build_settings_view(AppState& state, ScreenInteractive& screen)
             rows.push_back(kv("Theme", text(state.config.theme) | color(t.text)));
             rows.push_back(kv("Active chats", text(std::to_string(state.conversations.size())) | color(t.text)));
             rows.push_back(kv("Archived chats", text(std::to_string(state.archived.size())) | color(t.text)));
+            rows.push_back(text(""));
+
+            const bool on_enabled = state.config.system_prompt_enabled;
+            rows.push_back(text("  System prompt") | color(t.accent) | bold);
+            rows.push_back(text(""));
+            rows.push_back(hbox({
+                text(mark(0) + "Status  ") | size(WIDTH, EQUAL, 18)
+                    | (state.settings_sel == 0 ? (color(t.accent) | bold) : color(t.text_dim)),
+                text(on_enabled ? " On " : " Off ")
+                    | color(t.bg) | bgcolor(on_enabled ? t.ok : t.text_dim) | bold,
+                text(on_enabled ? "  sent ahead of every message"
+                                : "  using the model's built-in prompt") | color(t.text_dim),
+            }));
+            rows.push_back(text(""));
+            rows.push_back(text(mark(1) + "Prompt")
+                           | (state.settings_sel == 1 ? (color(t.accent) | bold) : color(t.text_dim)));
+            Element box = prompt_input->Render() | size(HEIGHT, EQUAL, 5);
+            rows.push_back(hbox({text("   "), box | bgcolor(t.panel_alt) | flex}));
+            rows.push_back(text(""));
+            rows.push_back(hbox({text(mark(2)), save->Render()}));
         }
 
         Element doc = vbox(std::move(rows)) | flex;
-        if (host_input->Focused()) {
-            return doc;  // the host field owns the cursor
+        if (host_input->Focused() || prompt_input->Focused()) {
+            return doc;  // the focused text field owns the cursor
         }
         if (state.settings_view == 2) {
             return doc;  // the selected theme row already carries focus for its scroll frame
@@ -1597,10 +1629,16 @@ static Component build_settings_view(AppState& state, ScreenInteractive& screen)
         return doc | focus;
     });
 
-    return CatchEvent(view, [host_input, save, container, &state](Event e) {
-        // The host field is the only real text input; keep it focused only on the
-        // Connections host row, so other subviews never capture typing or a cursor.
-        container->SetActiveChild((state.settings_view == 1 && state.settings_sel == 0) ? host_input : save);
+    return CatchEvent(view, [host_input, prompt_input, save, container, &state](Event e) {
+        // Keep a text field focused only on the row that owns one (Connections host,
+        // General prompt), so other subviews never capture typing or a cursor.
+        Component active = save;
+        if (state.settings_view == 1 && state.settings_sel == 0) {
+            active = host_input;
+        } else if (state.settings_view == 0 && state.settings_sel == 1) {
+            active = prompt_input;
+        }
+        container->SetActiveChild(active);
 
         if (state.settings_view == 1) {  // Connections: host (0), Save (1)
             if (e == Event::ArrowDown || e == Event::ArrowUp) {
@@ -1683,10 +1721,31 @@ static Component build_settings_view(AppState& state, ScreenInteractive& screen)
             }
             return false;
         }
-        // General: read-only. Swallow vertical nav / Enter so they don't move
-        // focus onto the host field or trip the hidden Save button; Left still
-        // bubbles to the parent and returns to the sidebar tree.
-        return e == Event::ArrowUp || e == Event::ArrowDown || e == Event::Return;
+        // General: system prompt toggle (0), prompt field (1), Save (2). Left is
+        // left unhandled so it bubbles to the parent and returns to the sidebar.
+        const int n = 3;
+        int& sel = state.settings_sel;
+        if (sel >= n) {
+            sel = 0;
+        }
+        if (e == Event::ArrowDown || e == Event::ArrowUp) {
+            sel = (e == Event::ArrowDown) ? (sel + 1) % n : (sel + n - 1) % n;
+            container->SetActiveChild(sel == 1 ? prompt_input : save);
+            return true;
+        }
+        if (sel == 0) {  // the On/Off toggle
+            if (e == Event::Return || (e.is_character() && e.character() == " ")) {
+                state.config.system_prompt_enabled = !state.config.system_prompt_enabled;
+                save_config(state.config);
+                state.status = state.config.system_prompt_enabled
+                                   ? "system prompt on"
+                                   : "system prompt off (using model default)";
+                return true;
+            }
+            return false;
+        }
+        // sel 1 edits the prompt field itself; sel 2 lets Save's Enter run.
+        return false;
     });
 }
 
@@ -2002,8 +2061,12 @@ ftxui::Component build_app(AppState& state, ScreenInteractive& screen) {
                 hint = (state.settings_sel >= 1)
                            ? "←: views   ↑/↓: move   Enter: manage chat   Ctrl+C: quit"
                            : "←: views   ↑/↓: move   Enter: export all   Ctrl+C: quit";
+            } else if (state.settings_sel == 0) {
+                hint = "←: views   ↑/↓: move   Enter/Space: toggle prompt   Ctrl+C: quit";
+            } else if (state.settings_sel == 1) {
+                hint = "Type a system prompt   ↑/↓: fields   Enter: newline   Ctrl+C: quit";
             } else {
-                hint = "←: views   ↑/↓: sections   Ctrl+C: quit";
+                hint = "←: views   ↑/↓: move   Enter: save   Ctrl+C: quit";
             }
         } else {
             hint = "←: views   / commands   Ctrl+C: quit";
